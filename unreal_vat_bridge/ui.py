@@ -1,4 +1,4 @@
-﻿import bpy
+import bpy
 from bpy.types import Panel
 
 from . import constants, preview
@@ -46,6 +46,10 @@ class UVB_PT_main(Panel):
         frame_box.prop(settings, "start_frame", text="Start Frame")
         frame_box.prop(settings, "end_frame", text="End Frame")
         frame_box.prop(settings, "reference_frame", text="Reference Frame")
+        if hasattr(settings, "uv_map_index"):
+            frame_box.prop(settings, "uv_map_index", text="UV Index")
+        else:
+            frame_box.label(text="UV Index: 0 (reload addon)")
         source_fps = preview.get_source_fps(context.scene)
         source_fps_row = frame_box.row()
         source_fps_row.enabled = False

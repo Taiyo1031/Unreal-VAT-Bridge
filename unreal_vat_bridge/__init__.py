@@ -1,4 +1,4 @@
-﻿bl_info = {
+bl_info = {
     "name": "Unreal VAT Bridge",
     "author": "Taiyo",
     "version": (0, 1, 0),

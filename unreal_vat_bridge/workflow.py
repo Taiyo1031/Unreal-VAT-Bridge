@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import glob
 import json
@@ -11,7 +11,13 @@ import bpy
 from . import constants, preview
 
 UVB_RUNTIME_NODE_GROUP_PREFIX = "UVB_Runtime_"
-UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-01-real-render-v6"
+UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-01-helper-fbx-v14"
+WHAT_TO_SHOW_POSITION = "Position"
+WHAT_TO_SHOW_NORMAL = "Normal/UVOffset"
+WHAT_TO_SHOW_MENU_INDEX = {
+    WHAT_TO_SHOW_POSITION: 0,
+    WHAT_TO_SHOW_NORMAL: 1,
+}
 
 class ExportWorkflowError(RuntimeError):
     pass
@@ -48,6 +54,7 @@ class TempSceneState:
     source_collection_for_gn: bpy.types.Collection | None
     source_object_for_gn: bpy.types.Object | None
     reference_object: bpy.types.Object
+    selected_uv_name: str
 
 
 @dataclass
@@ -91,7 +98,7 @@ def run_export(context, settings, reporter=None):
             report,
         )
 
-        report({"INFO"}, "Exporting rendered Position/Normal textures...")
+        report({"INFO"}, "Exporting Position/Normal textures...")
         position_texture, normal_texture = _export_rendered_textures(context, prepared, temp_state, settings, report)
 
         json_path = None
@@ -111,7 +118,7 @@ def run_export(context, settings, reporter=None):
         mesh_path = None
         if settings.export_mesh_file:
             report({"INFO"}, "Exporting FBX mesh...")
-            mesh_path = _export_mesh_fbx(context, prepared)
+            mesh_path = _export_mesh_fbx(context, prepared, temp_state, settings, reporter=report)
 
         result = ExportResult(
             position_texture=position_texture,
@@ -228,6 +235,7 @@ def _resolve_source_selection(scene, settings):
 
 def _create_temporary_scene(context, prepared, settings, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
+    uv_map_index = _get_uv_map_index(settings)
 
     scene_name = constants.TEMP_SCENE_BASENAME
     temp_scene = _create_or_overwrite_named_scene(scene_name)
@@ -247,6 +255,11 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
         temp_scene,
         prepared,
     )
+    selected_uv_name = _prepare_temp_source_uv_layers(
+        source_copy_objects,
+        uv_map_index,
+        reporter=report,
+    )
 
     report({"INFO"}, "Creating static reference-frame mesh object...")
     reference_object = _create_reference_frame_object(
@@ -255,6 +268,7 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
         source_copy_objects,
         int(settings.reference_frame),
     )
+    _ensure_mesh_object_uv_layer(reference_object, uv_map_index, selected_uv_name)
 
     helper_mesh = bpy.data.meshes.new(f"{scene_name}_HelperPlaneMesh")
     helper_mesh.from_pydata(
@@ -280,6 +294,7 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
         source_collection_for_gn=source_collection_for_gn,
         source_object_for_gn=source_object_for_gn,
         reference_object=reference_object,
+        selected_uv_name=selected_uv_name,
     )
 
 
@@ -316,6 +331,68 @@ def _duplicate_sources_into_compute_scene(temp_scene, prepared):
             source_collection_for_gn.objects.link(obj_copy)
 
     return source_copy_objects, source_object_for_gn, source_collection_for_gn
+
+
+def _prepare_temp_source_uv_layers(source_objects, uv_layer_index, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
+    mesh_objects = [obj for obj in source_objects if obj is not None and obj.type == "MESH" and getattr(obj, "data", None) is not None]
+    if not mesh_objects:
+        raise ExportWorkflowError("No mesh objects were available to prepare UV layers for export.")
+
+    uv_layer_index = max(0, int(uv_layer_index))
+    canonical_name = _ensure_mesh_object_uv_layer(mesh_objects[0], uv_layer_index)
+    for obj in mesh_objects[1:]:
+        _ensure_mesh_object_uv_layer(obj, uv_layer_index, canonical_name)
+
+    report(
+        {"INFO"},
+        f"Using UV index {uv_layer_index} with UV name '{canonical_name}' for Geometry Nodes export.",
+    )
+    return canonical_name
+
+
+def _ensure_mesh_object_uv_layer(obj, uv_layer_index, preferred_name=None):
+    if obj is None or getattr(obj, "type", None) != "MESH" or getattr(obj, "data", None) is None:
+        raise ExportWorkflowError("A mesh object is required when preparing UV layers.")
+
+    uv_layers = getattr(obj.data, "uv_layers", None)
+    if uv_layers is None:
+        raise ExportWorkflowError(f"Object '{obj.name}' does not support UV layers.")
+
+    uv_layer_index = max(0, int(uv_layer_index))
+    while len(uv_layers) <= uv_layer_index:
+        created = uv_layers.new(name=_default_uv_layer_name(len(uv_layers)))
+        if created is None:
+            raise ExportWorkflowError(
+                f"Failed to create UV layer {len(uv_layers)} on object '{obj.name}'."
+            )
+
+    target_layer = uv_layers[uv_layer_index]
+    desired_name = preferred_name or target_layer.name or _default_uv_layer_name(uv_layer_index)
+
+    for index, layer in enumerate(uv_layers):
+        if index == uv_layer_index:
+            continue
+        if layer.name != desired_name:
+            continue
+        layer.name = _default_uv_layer_name(index)
+
+    target_layer.name = desired_name
+    return str(target_layer.name)
+
+
+def _default_uv_layer_name(index):
+    if int(index) <= 0:
+        return "UVMap"
+    return f"UVMap.{int(index):03d}"
+
+
+def _get_uv_map_index(settings):
+    try:
+        value = int(getattr(settings, "uv_map_index", 0))
+    except Exception:
+        value = 0
+    return max(0, min(3, value))
 
 
 def _create_reference_frame_object(context, temp_scene, source_copy_objects, reference_frame):
@@ -403,12 +480,15 @@ def _join_objects_in_scene(context, scene, objects_to_join):
 def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
     gn_modifier = temp_state.gn_modifier
+    uv_map_index = _get_uv_map_index(settings)
 
     payload = {
         "mode": settings.export_mode,
         "start_frame": settings.start_frame,
         "end_frame": settings.end_frame,
         "reference_frame": settings.reference_frame,
+        "uv_map_index": uv_map_index,
+        "uv_name": temp_state.selected_uv_name,
         "use_collection": prepared.use_collection,
         "object": temp_state.source_object_for_gn.name if temp_state.source_object_for_gn else "",
         "collection": temp_state.source_collection_for_gn.name if temp_state.source_collection_for_gn else "",
@@ -419,6 +499,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         "source_fps": prepared.source_fps,
         "source_kind": prepared.source_kind,
         "asset_name": prepared.asset_name,
+        "show_export_mesh": False,
         "skip_grid_transfer": False,
     }
     gn_modifier["uvb_deferred_socket_payload"] = json.dumps(payload)
@@ -453,6 +534,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
         temp_state.reference_object,
     )
+    set_required("UV Name", ("UVName", "UV Name"), str(temp_state.selected_uv_name))
 
     if prepared.use_collection:
         set_required(
@@ -483,6 +565,14 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
                 report({"WARNING"}, "Could not clear Collection socket when Use Collection is disabled.")
 
     _set_skip_grid_transfer(prepared.node_group, gn_modifier, False, report)
+    _set_show_export_mesh(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
+    _set_what_to_show_mode(
+        prepared.node_group,
+        gn_modifier,
+        WHAT_TO_SHOW_POSITION,
+        reporter=report,
+        allow_missing=True,
+    )
 
     if required_missing:
         missing_text = ", ".join(required_missing)
@@ -490,6 +580,91 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
             "ComputeVertexVAT input sockets are missing: "
             f"{missing_text}. Please match the fixed socket names."
         )
+
+
+def _find_what_to_show_identifier(node_group):
+    resolved = _resolve_input_socket_identifiers(node_group)
+    return _find_socket_identifier(resolved, ("WhatToShow", "What To Show"))
+
+
+def _find_uv_name_identifier(node_group):
+    resolved = _resolve_input_socket_identifiers(node_group)
+    return _find_socket_identifier(resolved, ("UVName", "UV Name"))
+
+
+def _find_show_export_mesh_identifier(node_group):
+    resolved = _resolve_input_socket_identifiers(node_group)
+    return _find_socket_identifier(resolved, ("ShowExportMesh", "Show Export Mesh"))
+
+
+def _set_what_to_show_mode(node_group, gn_modifier, mode_name, reporter=None, allow_missing=False):
+    report = reporter if reporter else (lambda _level, _message: None)
+    identifier = _find_what_to_show_identifier(node_group)
+    if not identifier:
+        if allow_missing:
+            report({"WARNING"}, "WhatToShow input was not found on Geometry Nodes group.")
+            return None
+        raise ExportWorkflowError(
+            "WhatToShow input was not found on Geometry Nodes group. "
+            "Required for Position/Normal display export."
+        )
+
+    menu_index = WHAT_TO_SHOW_MENU_INDEX.get(mode_name)
+    if menu_index is None:
+        raise ExportWorkflowError(f"Unsupported WhatToShow mode: {mode_name}")
+
+    try:
+        gn_modifier[identifier] = int(menu_index)
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to assign WhatToShow='{mode_name}' to Geometry Nodes input '{identifier}': {exc}"
+        ) from exc
+
+    return identifier
+
+
+def _set_uv_name_input(node_group, gn_modifier, uv_name, reporter=None, allow_missing=False):
+    report = reporter if reporter else (lambda _level, _message: None)
+    identifier = _find_uv_name_identifier(node_group)
+    if not identifier:
+        if allow_missing:
+            report({"WARNING"}, "UVName input was not found on Geometry Nodes group.")
+            return None
+        raise ExportWorkflowError(
+            "UVName input was not found on Geometry Nodes group. "
+            "Required for UV transfer."
+        )
+
+    try:
+        gn_modifier[identifier] = str(uv_name or "")
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to assign UVName='{uv_name}' to Geometry Nodes input '{identifier}': {exc}"
+        ) from exc
+
+    return identifier
+
+
+def _set_show_export_mesh(node_group, gn_modifier, enabled, reporter=None, allow_missing=False):
+    report = reporter if reporter else (lambda _level, _message: None)
+    identifier = _find_show_export_mesh_identifier(node_group)
+    if not identifier:
+        if allow_missing:
+            report({"WARNING"}, "ShowExportMesh input was not found on Geometry Nodes group.")
+            return None
+        raise ExportWorkflowError(
+            "ShowExportMesh input was not found on Geometry Nodes group. "
+            "Required for FBX export mesh output."
+        )
+
+    try:
+        gn_modifier[identifier] = bool(enabled)
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to assign ShowExportMesh={bool(enabled)} to Geometry Nodes input '{identifier}': {exc}"
+        ) from exc
+
+    return identifier
 
 
 def _set_skip_grid_transfer(node_group, gn_modifier, enabled, reporter=None):
@@ -1713,6 +1888,98 @@ def _ensure_scene_compositor_tree(scene):
 def _export_rendered_textures(context, prepared, temp_state, settings, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
 
+    try:
+        return _export_textures_from_realized_geometry(context, prepared, temp_state, settings, reporter=report)
+    except ExportWorkflowError as exc:
+        report(
+            {"WARNING"},
+            "Direct Geometry Nodes texel export failed. Falling back to render export: "
+            f"{exc}",
+        )
+        return _export_rendered_textures_via_render(context, prepared, temp_state, settings, reporter=report)
+
+
+def _export_textures_from_realized_geometry(context, prepared, temp_state, settings, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
+
+    prefix = _build_texture_prefix(settings, prepared.asset_name)
+    position_filename = f"{prefix}_{constants.POSITION_SUFFIX}.exr"
+    normal_filename = f"{prefix}_{constants.NORMAL_SUFFIX}.exr"
+    position_path = os.path.join(prepared.output_directory, position_filename)
+    normal_path = os.path.join(prepared.output_directory, normal_filename)
+
+    scene = temp_state.scene
+    eval_frame = int(settings.end_frame)
+
+    previous_window_scene = context.window.scene if context.window else None
+    previous_frame = scene.frame_current
+    previous_image_settings = _capture_scene_image_settings(scene)
+
+    what_to_show_identifier = None
+    previous_what_to_show = None
+
+    try:
+        if context.window:
+            context.window.scene = scene
+
+        scene.frame_set(eval_frame)
+        _apply_scene_exr_image_settings(scene)
+
+        what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
+        if not what_to_show_identifier:
+            raise ExportWorkflowError(
+                "WhatToShow input was not found on Geometry Nodes group. "
+                "Required for Position/Normal attribute export."
+            )
+        previous_what_to_show = _read_modifier_input_value(
+            temp_state.gn_modifier,
+            prepared.node_group,
+            what_to_show_identifier,
+        )
+
+        _write_display_attribute_texture_from_geometry(
+            context,
+            scene,
+            temp_state,
+            prepared,
+            position_path,
+            eval_frame,
+            WHAT_TO_SHOW_POSITION,
+            reporter=report,
+        )
+        _write_display_attribute_texture_from_geometry(
+            context,
+            scene,
+            temp_state,
+            prepared,
+            normal_path,
+            eval_frame,
+            WHAT_TO_SHOW_NORMAL,
+            reporter=report,
+        )
+
+        report({"INFO"}, f"Direct Position EXR: {position_path}")
+        report({"INFO"}, f"Direct Normal EXR: {normal_path}")
+        return position_path, normal_path
+
+    finally:
+        if what_to_show_identifier:
+            try:
+                temp_state.gn_modifier[what_to_show_identifier] = int(previous_what_to_show)
+            except Exception:
+                pass
+
+        _restore_scene_image_settings(scene, previous_image_settings)
+
+        scene.frame_set(previous_frame)
+
+        if context.window and previous_window_scene:
+            context.window.scene = previous_window_scene
+
+
+def _export_rendered_textures_via_render(context, prepared, temp_state, settings, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
+
     prefix = _build_texture_prefix(settings, prepared.asset_name)
     position_filename = f"{prefix}_{constants.POSITION_SUFFIX}.exr"
     normal_filename = f"{prefix}_{constants.NORMAL_SUFFIX}.exr"
@@ -1727,13 +1994,23 @@ def _export_rendered_textures(context, prepared, temp_state, settings, reporter=
     previous_frame = scene.frame_current
     previous_engine = scene.render.engine
     previous_compositor_flags = _enable_scene_compositor_flags(scene)
-    previous_pass_normal = getattr(view_layer, "use_pass_normal", None)
-    previous_pass_position = getattr(view_layer, "use_pass_position", None)
+    previous_material_override = getattr(view_layer, "material_override", None) if hasattr(view_layer, "material_override") else None
     previous_compositing_node_group = getattr(scene, "compositing_node_group", None) if hasattr(scene, "compositing_node_group") else None
+    previous_film_transparent = getattr(scene.render, "film_transparent", None) if hasattr(scene.render, "film_transparent") else None
+    previous_image_settings = _capture_scene_image_settings(scene)
+    previous_cycles_settings = _capture_cycles_export_settings(scene)
+    previous_hide_render = {obj.name: bool(getattr(obj, "hide_render", False)) for obj in scene.objects}
+    previous_view_transform = getattr(scene.view_settings, "view_transform", None) if hasattr(scene, "view_settings") else None
+    previous_look = getattr(scene.view_settings, "look", None) if hasattr(scene, "view_settings") and hasattr(scene.view_settings, "look") else None
+    previous_exposure = getattr(scene.view_settings, "exposure", None) if hasattr(scene, "view_settings") and hasattr(scene.view_settings, "exposure") else None
+    previous_gamma = getattr(scene.view_settings, "gamma", None) if hasattr(scene, "view_settings") and hasattr(scene.view_settings, "gamma") else None
 
     node_tree = None
     created_nodes = []
     created_compositor_tree = False
+    override_material = None
+    what_to_show_identifier = None
+    previous_what_to_show = None
 
     try:
         if context.window:
@@ -1742,13 +2019,23 @@ def _export_rendered_textures(context, prepared, temp_state, settings, reporter=
         scene.frame_set(eval_frame)
         scene.render.engine = "CYCLES"
 
-        if not hasattr(view_layer, "use_pass_normal"):
-            raise ExportWorkflowError("View Layer Normal pass is not available in this Blender build.")
-        if not hasattr(view_layer, "use_pass_position"):
-            raise ExportWorkflowError("View Layer Position pass is not available in this Blender build.")
+        _set_scene_render_visibility_for_texture_export(scene, temp_state.helper_object, temp_state.camera_object)
 
-        view_layer.use_pass_normal = True
-        view_layer.use_pass_position = True
+        override_material = _create_attribute_override_material("DisplayAttribute", attribute_type="INSTANCER")
+        if hasattr(view_layer, "material_override"):
+            view_layer.material_override = override_material
+
+        _set_view_transform_if_available(scene, "Raw")
+        if previous_look is not None:
+            _set_scene_look_if_available(scene, "None")
+        if previous_exposure is not None:
+            scene.view_settings.exposure = 0.0
+        if previous_gamma is not None:
+            scene.view_settings.gamma = 1.0
+        if previous_film_transparent is not None:
+            scene.render.film_transparent = True
+        _apply_scene_exr_image_settings(scene)
+        _apply_cycles_export_settings(scene)
 
         node_tree, created_compositor_tree = _ensure_scene_compositor_tree(scene)
         if node_tree is None:
@@ -1759,55 +2046,60 @@ def _export_rendered_textures(context, prepared, temp_state, settings, reporter=
             )
 
         nodes = node_tree.nodes
-        links = node_tree.links
-
         render_layers = nodes.new("CompositorNodeRLayers")
         created_nodes.append(render_layers)
-
-        position_output = nodes.new("CompositorNodeOutputFile")
-        created_nodes.append(position_output)
-
-        normal_output = nodes.new("CompositorNodeOutputFile")
-        created_nodes.append(normal_output)
 
         token = f"UVB_TMP_{uuid.uuid4().hex}"
         position_prefix = f"{token}_Position_"
         normal_prefix = f"{token}_Normal_"
 
-        _configure_file_output_node_for_exr(position_output, prepared.output_directory, position_prefix)
-        _configure_file_output_node_for_exr(normal_output, prepared.output_directory, normal_prefix)
-
-        _remove_file_output_candidates(prepared.output_directory, position_prefix)
-        _remove_file_output_candidates(prepared.output_directory, normal_prefix)
-
-        position_socket = _find_compositor_output_socket(render_layers, ("Position",))
-        normal_socket = _find_compositor_output_socket(render_layers, ("Normal",))
-
-        if position_socket is None or normal_socket is None:
+        image_socket = _find_compositor_output_socket(render_layers, ("Image", "Combined"))
+        if image_socket is None:
             available = [sock.name for sock in render_layers.outputs]
             available_text = ", ".join(available) if available else "(none)"
             raise ExportWorkflowError(
                 "Required compositor passes were not found. "
-                f"Need Position and Normal. Available Render Layers outputs: {available_text}"
+                f"Need Image/Combined. Available Render Layers outputs: {available_text}"
             )
 
-        links.new(position_socket, position_output.inputs[0])
-        links.new(normal_socket, normal_output.inputs[0])
-
-        with context.temp_override(scene=scene, view_layer=view_layer):
-            result = bpy.ops.render.render(write_still=False, use_viewport=False)
-
-        if "FINISHED" not in result:
-            raise ExportWorkflowError("Render operation did not finish successfully for EXR export.")
-
-        generated_position = _find_latest_file_output(prepared.output_directory, position_prefix)
-        generated_normal = _find_latest_file_output(prepared.output_directory, normal_prefix)
-
-        if generated_position is None or generated_normal is None:
+        what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
+        if not what_to_show_identifier:
             raise ExportWorkflowError(
-                "Rendered EXR files were not generated by compositor file outputs. "
-                f"Position prefix: {position_prefix}, Normal prefix: {normal_prefix}"
+                "WhatToShow input was not found on Geometry Nodes group. "
+                "Required for Position/Normal attribute export."
             )
+        previous_what_to_show = _read_modifier_input_value(
+            temp_state.gn_modifier,
+            prepared.node_group,
+            what_to_show_identifier,
+        )
+
+        generated_position = _render_display_attribute_texture(
+            context,
+            scene,
+            view_layer,
+            render_layers,
+            temp_state,
+            prepared,
+            prepared.output_directory,
+            position_prefix,
+            eval_frame,
+            WHAT_TO_SHOW_POSITION,
+            reporter=report,
+        )
+        generated_normal = _render_display_attribute_texture(
+            context,
+            scene,
+            view_layer,
+            render_layers,
+            temp_state,
+            prepared,
+            prepared.output_directory,
+            normal_prefix,
+            eval_frame,
+            WHAT_TO_SHOW_NORMAL,
+            reporter=report,
+        )
 
         if os.path.exists(position_path):
             os.remove(position_path)
@@ -1832,10 +2124,17 @@ def _export_rendered_textures(context, prepared, temp_state, settings, reporter=
                 except Exception:
                     pass
 
-        if previous_pass_normal is not None and hasattr(view_layer, "use_pass_normal"):
-            view_layer.use_pass_normal = previous_pass_normal
-        if previous_pass_position is not None and hasattr(view_layer, "use_pass_position"):
-            view_layer.use_pass_position = previous_pass_position
+        if hasattr(view_layer, "material_override"):
+            try:
+                view_layer.material_override = previous_material_override
+            except Exception:
+                pass
+
+        if what_to_show_identifier:
+            try:
+                temp_state.gn_modifier[what_to_show_identifier] = int(previous_what_to_show)
+            except Exception:
+                pass
 
         scene.render.engine = previous_engine
         _restore_scene_compositor_flags(scene, previous_compositor_flags)
@@ -1853,23 +2152,700 @@ def _export_rendered_textures(context, prepared, temp_state, settings, reporter=
             except Exception:
                 pass
 
+        if previous_film_transparent is not None and hasattr(scene.render, "film_transparent"):
+            scene.render.film_transparent = previous_film_transparent
+        _restore_scene_image_settings(scene, previous_image_settings)
+        _restore_cycles_export_settings(scene, previous_cycles_settings)
+
+        _restore_scene_render_visibility(scene, previous_hide_render)
+        _restore_scene_view_settings(
+            scene,
+            previous_view_transform,
+            previous_look,
+            previous_exposure,
+            previous_gamma,
+        )
+
+        if override_material is not None:
+            try:
+                if getattr(override_material, "users", 0) == 0:
+                    bpy.data.materials.remove(override_material, do_unlink=True)
+            except Exception:
+                pass
+
         scene.frame_set(previous_frame)
 
         if context.window and previous_window_scene:
             context.window.scene = previous_window_scene
 
 
-def _configure_file_output_node_for_exr(node, base_path, slot_path_prefix):
-    node.base_path = base_path
-    node.format.file_format = "OPEN_EXR"
-    node.format.color_mode = "RGB"
-    node.format.color_depth = "16"
-    node.format.exr_codec = "ZIP"
+def _write_display_attribute_texture_from_geometry(
+    context,
+    scene,
+    temp_state,
+    prepared,
+    output_path,
+    evaluate_frame,
+    what_to_show_mode,
+    reporter=None,
+):
+    report = reporter if reporter else (lambda _level, _message: None)
+    report({"INFO"}, f"Writing texels directly from Geometry Nodes for WhatToShow='{what_to_show_mode}'..." )
 
-    if len(node.file_slots) == 0:
-        node.file_slots.new("Image")
+    _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
+    scene.frame_set(int(evaluate_frame))
 
-    node.file_slots[0].path = slot_path_prefix
+    pixels = _read_display_attribute_pixels_via_realized_instances_probe(
+        context,
+        scene,
+        temp_state.helper_object,
+        int(evaluate_frame),
+        int(prepared.export_texture_width),
+        int(prepared.export_texture_height),
+        attribute_name="DisplayAttribute",
+    )
+    _save_float_exr_image(scene, output_path, int(prepared.export_texture_width), int(prepared.export_texture_height), pixels)
+
+
+def _read_display_attribute_pixels_via_realized_instances_probe(
+    context,
+    scene,
+    helper_object,
+    evaluate_frame,
+    texture_width,
+    texture_height,
+    attribute_name="DisplayAttribute",
+):
+    if texture_width <= 0 or texture_height <= 0:
+        raise ExportWorkflowError("Texture resolution must be positive for direct texel export.")
+
+    previous_window_scene = context.window.scene if context.window else None
+    previous_frame = scene.frame_current
+    probe_object = None
+    probe_group = None
+
+    try:
+        probe_object = helper_object.copy()
+        if helper_object.data is not None:
+            probe_object.data = helper_object.data.copy()
+        probe_object.name = _unique_name("UVB_TexelProbeObject", bpy.data.objects.keys())
+        scene.collection.objects.link(probe_object)
+
+        probe_group = _create_realize_instances_probe_group()
+        probe_modifier = probe_object.modifiers.new("UVB_RealizeProbe", "NODES")
+        probe_modifier.node_group = probe_group
+
+        if context.window:
+            context.window.scene = scene
+        scene.frame_set(int(evaluate_frame))
+
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = probe_object.evaluated_get(depsgraph)
+        eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+        if eval_mesh is None:
+            raise ExportWorkflowError("Failed to evaluate realized Geometry Nodes mesh for direct texel export.")
+
+        try:
+            return _rasterize_realized_attribute_mesh(eval_mesh, texture_width, texture_height, attribute_name)
+        finally:
+            eval_obj.to_mesh_clear()
+    finally:
+        if probe_object is not None:
+            mesh_data = probe_object.data
+            try:
+                bpy.data.objects.remove(probe_object, do_unlink=True)
+            except Exception:
+                pass
+
+            if mesh_data is not None and getattr(mesh_data, "users", 0) == 0:
+                try:
+                    bpy.data.meshes.remove(mesh_data, do_unlink=True)
+                except Exception:
+                    pass
+
+        if probe_group is not None and getattr(probe_group, "users", 0) == 0:
+            try:
+                bpy.data.node_groups.remove(probe_group, do_unlink=True)
+            except Exception:
+                pass
+
+        scene.frame_set(previous_frame)
+        if context.window and previous_window_scene:
+            context.window.scene = previous_window_scene
+
+
+def _rasterize_realized_attribute_mesh(mesh, texture_width, texture_height, attribute_name):
+    attributes = getattr(mesh, "attributes", None)
+    if attributes is None or attribute_name not in attributes:
+        available = []
+        if attributes is not None:
+            available = [str(getattr(attr, "name", "")) for attr in attributes]
+        available_text = ", ".join(name for name in available if name) if available else "(none)"
+        raise ExportWorkflowError(
+            f"Attribute '{attribute_name}' was not found on the realized Geometry Nodes mesh. "
+            f"Available attributes: {available_text}"
+        )
+
+    attribute = attributes[attribute_name]
+    pixels = [0.0] * (texture_width * texture_height * 4)
+    write_counts = [0] * (texture_width * texture_height)
+
+    for poly in mesh.polygons:
+        vertex_indices = list(poly.vertices)
+        if not vertex_indices:
+            continue
+
+        center_x = sum(float(mesh.vertices[index].co.x) for index in vertex_indices) / float(len(vertex_indices))
+        center_y = sum(float(mesh.vertices[index].co.y) for index in vertex_indices) / float(len(vertex_indices))
+        pixel_x = int(round(((center_x + 0.5) * float(texture_width)) - 0.5))
+        pixel_y = int(round(((center_y + 0.5) * float(texture_height)) - 0.5))
+        if pixel_x < 0 or pixel_x >= texture_width or pixel_y < 0 or pixel_y >= texture_height:
+            continue
+
+        rgba = _average_polygon_attribute_rgba(attribute, poly)
+        pixel_index = (pixel_y * texture_width) + pixel_x
+        base = pixel_index * 4
+        previous_count = write_counts[pixel_index]
+        if previous_count == 0:
+            pixels[base:base + 4] = rgba
+        else:
+            total = float(previous_count + 1)
+            for channel_index, value in enumerate(rgba):
+                current_value = pixels[base + channel_index]
+                pixels[base + channel_index] = ((current_value * float(previous_count)) + float(value)) / total
+        write_counts[pixel_index] = previous_count + 1
+
+    missing_count = sum(1 for count in write_counts if count == 0)
+    if missing_count:
+        raise ExportWorkflowError(
+            "Direct texel export could not map all pixels from the realized Geometry Nodes mesh. "
+            f"Missing texels: {missing_count}/{texture_width * texture_height}"
+        )
+
+    return pixels
+
+
+def _average_polygon_attribute_rgba(attribute, polygon):
+    indices = _resolve_polygon_attribute_indices(attribute, polygon)
+    if not indices:
+        return (0.0, 0.0, 0.0, 1.0)
+
+    totals = [0.0, 0.0, 0.0, 0.0]
+    for index in indices:
+        rgba = _attribute_sample_to_rgba(attribute.data[index])
+        for channel_index, value in enumerate(rgba):
+            totals[channel_index] += float(value)
+
+    inv = 1.0 / float(len(indices))
+    return tuple(value * inv for value in totals)
+
+
+def _resolve_polygon_attribute_indices(attribute, polygon):
+    domain = getattr(attribute, "domain", "")
+    if domain == "POINT":
+        return list(polygon.vertices)
+    if domain == "CORNER":
+        return list(polygon.loop_indices)
+    if domain == "FACE":
+        return [int(polygon.index)]
+    return []
+
+
+def _attribute_sample_to_rgba(sample):
+    if hasattr(sample, "color"):
+        values = [float(value) for value in sample.color]
+        if len(values) >= 4:
+            return tuple(values[:4])
+        if len(values) == 3:
+            return (values[0], values[1], values[2], 1.0)
+
+    if hasattr(sample, "vector"):
+        values = [float(value) for value in sample.vector]
+        if len(values) >= 3:
+            return (values[0], values[1], values[2], 1.0)
+        if len(values) == 2:
+            return (values[0], values[1], 0.0, 1.0)
+
+    if hasattr(sample, "uv"):
+        values = [float(value) for value in sample.uv]
+        if len(values) >= 2:
+            return (values[0], values[1], 0.0, 1.0)
+
+    if hasattr(sample, "value"):
+        value = float(sample.value)
+        return (value, value, value, 1.0)
+
+    if hasattr(sample, "x") and hasattr(sample, "y"):
+        x_value = float(sample.x)
+        y_value = float(sample.y)
+        z_value = float(getattr(sample, "z", 0.0))
+        return (x_value, y_value, z_value, 1.0)
+
+    return (0.0, 0.0, 0.0, 1.0)
+
+
+def _save_float_exr_image(scene, output_path, width, height, pixels):
+    image = bpy.data.images.new(
+        _unique_name("UVB_ExportImage", bpy.data.images.keys()),
+        width=int(width),
+        height=int(height),
+        alpha=True,
+        float_buffer=True,
+        is_data=True,
+    )
+
+    try:
+        if hasattr(image, "alpha_mode"):
+            try:
+                image.alpha_mode = "STRAIGHT"
+            except Exception:
+                pass
+        if hasattr(image, "colorspace_settings") and hasattr(image.colorspace_settings, "name"):
+            try:
+                image.colorspace_settings.name = "Non-Color"
+            except Exception:
+                pass
+
+        image.pixels.foreach_set(pixels)
+        image.filepath_raw = output_path
+        image.file_format = "OPEN_EXR"
+
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        image.save_render(output_path, scene=scene)
+    finally:
+        try:
+            bpy.data.images.remove(image, do_unlink=True)
+        except Exception:
+            pass
+
+
+def _render_display_attribute_texture(
+    context,
+    scene,
+    view_layer,
+    render_layers,
+    temp_state,
+    prepared,
+    output_directory,
+    output_prefix,
+    evaluate_frame,
+    what_to_show_mode,
+    reporter=None,
+):
+    report = reporter if reporter else (lambda _level, _message: None)
+    report({"INFO"}, f"Rendering DisplayAttribute for WhatToShow='{what_to_show_mode}'...")
+
+    _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
+    scene.frame_set(int(evaluate_frame))
+
+    node_tree = render_layers.id_data
+    nodes = node_tree.nodes
+    links = node_tree.links
+    output_node = nodes.new("CompositorNodeOutputFile")
+    alpha_convert_node = nodes.new("CompositorNodePremulKey")
+    set_alpha_node = nodes.new("CompositorNodeSetAlpha")
+    image_link = None
+    alpha_link = None
+    premul_link = None
+    output_link = None
+
+    try:
+        image_socket = _find_compositor_output_socket(render_layers, ("Image", "Combined"))
+        alpha_socket = _find_compositor_output_socket(render_layers, ("Alpha",))
+        if image_socket is None:
+            available = [sock.name for sock in render_layers.outputs]
+            available_text = ", ".join(available) if available else "(none)"
+            raise ExportWorkflowError(
+                "Image/Combined pass was not found for DisplayAttribute render. "
+                f"Available Render Layers outputs: {available_text}"
+            )
+        if alpha_socket is None:
+            available = [sock.name for sock in render_layers.outputs]
+            available_text = ", ".join(available) if available else "(none)"
+            raise ExportWorkflowError(
+                "Alpha pass was not found for DisplayAttribute render. "
+                f"Available Render Layers outputs: {available_text}"
+            )
+
+        _set_premul_key_to_straight(alpha_convert_node)
+        _set_set_alpha_replace(set_alpha_node)
+
+        output_input = _configure_file_output_node_for_exr(
+            output_node,
+            output_directory,
+            output_prefix,
+            socket_type="RGBA",
+            color_mode="RGBA",
+        )
+        _remove_file_output_candidates(output_directory, output_prefix)
+        image_link = links.new(image_socket, alpha_convert_node.inputs[0])
+        premul_link = links.new(alpha_convert_node.outputs[0], set_alpha_node.inputs[0])
+        alpha_link = links.new(alpha_socket, set_alpha_node.inputs[1])
+        output_link = links.new(set_alpha_node.outputs[0], output_input)
+
+        with context.temp_override(scene=scene, view_layer=view_layer):
+            result = bpy.ops.render.render(write_still=False, use_viewport=False)
+
+        if "FINISHED" not in result:
+            raise ExportWorkflowError(
+                f"Render operation did not finish successfully for WhatToShow='{what_to_show_mode}'."
+            )
+
+        generated_path = _find_latest_file_output(output_directory, output_prefix)
+        if generated_path is None:
+            raise ExportWorkflowError(
+                "Rendered EXR file was not generated by compositor file output. "
+                f"WhatToShow='{what_to_show_mode}', prefix='{output_prefix}'."
+            )
+        return generated_path
+    except RuntimeError as exc:
+        raise ExportWorkflowError(
+            f"Rendered EXR export failed for WhatToShow='{what_to_show_mode}': {exc}"
+        ) from exc
+    finally:
+        try:
+            if image_link is not None:
+                links.remove(image_link)
+        except Exception:
+            pass
+        try:
+            if alpha_link is not None:
+                links.remove(alpha_link)
+        except Exception:
+            pass
+        try:
+            if premul_link is not None:
+                links.remove(premul_link)
+        except Exception:
+            pass
+        try:
+            if output_link is not None:
+                links.remove(output_link)
+        except Exception:
+            pass
+        try:
+            if set_alpha_node.name in nodes:
+                nodes.remove(set_alpha_node)
+        except Exception:
+            pass
+        try:
+            if alpha_convert_node.name in nodes:
+                nodes.remove(alpha_convert_node)
+        except Exception:
+            pass
+        try:
+            if output_node.name in nodes:
+                nodes.remove(output_node)
+        except Exception:
+            pass
+
+
+def _capture_scene_image_settings(scene):
+    image_settings = getattr(scene.render, "image_settings", None)
+    if image_settings is None:
+        return {}
+
+    state = {}
+    for attr in ("file_format", "color_mode", "color_depth", "exr_codec", "compression", "color_management"):
+        if not hasattr(image_settings, attr):
+            continue
+        try:
+            state[attr] = getattr(image_settings, attr)
+        except Exception:
+            pass
+    return state
+
+
+def _capture_cycles_export_settings(scene):
+    cycles = getattr(scene, "cycles", None)
+    if cycles is None:
+        return {}
+
+    state = {}
+    for attr in (
+        "samples",
+        "use_denoising",
+        "pixel_filter_type",
+        "filter_width",
+        "diffuse_bounces",
+        "glossy_bounces",
+        "transmission_bounces",
+        "volume_bounces",
+        "transparent_max_bounces",
+        "max_bounces",
+    ):
+        if not hasattr(cycles, attr):
+            continue
+        try:
+            state[attr] = getattr(cycles, attr)
+        except Exception:
+            pass
+    return state
+
+
+def _apply_scene_exr_image_settings(scene):
+    image_settings = getattr(scene.render, "image_settings", None)
+    if image_settings is None:
+        return
+
+    try:
+        image_settings.file_format = "OPEN_EXR"
+    except Exception:
+        pass
+    try:
+        image_settings.color_mode = "RGBA"
+    except Exception:
+        pass
+    try:
+        image_settings.color_depth = "16"
+    except Exception:
+        pass
+    if hasattr(image_settings, "exr_codec"):
+        try:
+            image_settings.exr_codec = "ZIP"
+        except Exception:
+            pass
+    if hasattr(image_settings, "compression"):
+        try:
+            image_settings.compression = 0
+        except Exception:
+            pass
+    if hasattr(image_settings, "color_management"):
+        try:
+            image_settings.color_management = "OVERRIDE"
+        except Exception:
+            pass
+
+
+def _apply_cycles_export_settings(scene):
+    cycles = getattr(scene, "cycles", None)
+    if cycles is None:
+        return
+
+    for attr, value in (
+        ("samples", 1),
+        ("use_denoising", False),
+        ("pixel_filter_type", "BOX"),
+        ("filter_width", 0.01),
+        ("diffuse_bounces", 0),
+        ("glossy_bounces", 0),
+        ("transmission_bounces", 0),
+        ("volume_bounces", 0),
+        ("max_bounces", 0),
+    ):
+        if not hasattr(cycles, attr):
+            continue
+        try:
+            setattr(cycles, attr, value)
+        except Exception:
+            pass
+
+
+def _restore_scene_image_settings(scene, state):
+    image_settings = getattr(scene.render, "image_settings", None)
+    if image_settings is None:
+        return
+
+    for attr, value in state.items():
+        if not hasattr(image_settings, attr):
+            continue
+        try:
+            setattr(image_settings, attr, value)
+        except Exception:
+            pass
+
+
+def _restore_cycles_export_settings(scene, state):
+    cycles = getattr(scene, "cycles", None)
+    if cycles is None:
+        return
+
+    for attr, value in state.items():
+        if not hasattr(cycles, attr):
+            continue
+        try:
+            setattr(cycles, attr, value)
+        except Exception:
+            pass
+
+
+def _set_premul_key_to_straight(node):
+    for input_socket in getattr(node, "inputs", []):
+        if getattr(input_socket, "name", "") != "Type":
+            continue
+        try:
+            input_socket.default_value = "To Straight"
+        except Exception:
+            pass
+        return
+
+
+def _set_set_alpha_replace(node):
+    for input_socket in getattr(node, "inputs", []):
+        if getattr(input_socket, "name", "") != "Type":
+            continue
+        try:
+            input_socket.default_value = "Replace Alpha"
+        except Exception:
+            pass
+        return
+
+
+def _set_scene_render_visibility_for_texture_export(scene, helper_object, camera_object):
+    for obj in scene.objects:
+        obj.hide_render = obj not in {helper_object, camera_object}
+
+
+def _restore_scene_render_visibility(scene, previous_hide_render):
+    for obj in scene.objects:
+        if obj.name not in previous_hide_render:
+            continue
+        try:
+            obj.hide_render = bool(previous_hide_render[obj.name])
+        except Exception:
+            pass
+
+
+def _set_view_transform_if_available(scene, transform_name):
+    if not hasattr(scene, "view_settings") or not hasattr(scene.view_settings, "view_transform"):
+        return
+    try:
+        scene.view_settings.view_transform = transform_name
+    except Exception:
+        pass
+
+
+def _set_scene_look_if_available(scene, look_name):
+    if not hasattr(scene, "view_settings") or not hasattr(scene.view_settings, "look"):
+        return
+    try:
+        scene.view_settings.look = look_name
+    except Exception:
+        pass
+
+
+def _restore_scene_view_settings(scene, view_transform, look, exposure, gamma):
+    if not hasattr(scene, "view_settings"):
+        return
+
+    if view_transform is not None and hasattr(scene.view_settings, "view_transform"):
+        try:
+            scene.view_settings.view_transform = view_transform
+        except Exception:
+            pass
+
+    if look is not None and hasattr(scene.view_settings, "look"):
+        try:
+            scene.view_settings.look = look
+        except Exception:
+            pass
+
+    if exposure is not None and hasattr(scene.view_settings, "exposure"):
+        try:
+            scene.view_settings.exposure = float(exposure)
+        except Exception:
+            pass
+
+    if gamma is not None and hasattr(scene.view_settings, "gamma"):
+        try:
+            scene.view_settings.gamma = float(gamma)
+        except Exception:
+            pass
+
+
+def _create_attribute_override_material(attribute_name, attribute_type="INSTANCER"):
+    material_name = _unique_name("UVB_AttributeOverride", bpy.data.materials.keys())
+    material = bpy.data.materials.new(material_name)
+    material.use_nodes = True
+
+    node_tree = material.node_tree
+    if node_tree is None:
+        raise ExportWorkflowError("Failed to create node tree for attribute override material.")
+
+    nodes = node_tree.nodes
+    links = node_tree.links
+    nodes.clear()
+
+    output = nodes.new("ShaderNodeOutputMaterial")
+    emission = nodes.new("ShaderNodeEmission")
+    attribute = nodes.new("ShaderNodeAttribute")
+
+    attribute.attribute_name = attribute_name
+    if hasattr(attribute, "attribute_type"):
+        try:
+            attribute.attribute_type = attribute_type
+        except Exception:
+            pass
+
+    emission.inputs["Strength"].default_value = 1.0
+    links.new(attribute.outputs["Vector"], emission.inputs["Color"])
+    links.new(emission.outputs["Emission"], output.inputs["Surface"])
+    return material
+
+
+def _configure_file_output_node_for_exr(node, base_path, slot_path_prefix, socket_type="RGBA", color_mode="RGBA"):
+    if hasattr(node, "base_path"):
+        node.base_path = base_path
+        node.format.file_format = "OPEN_EXR"
+        node.format.color_mode = color_mode
+        node.format.color_depth = "16"
+        node.format.exr_codec = "ZIP"
+
+        if len(node.file_slots) == 0:
+            node.file_slots.new("Image")
+
+        node.file_slots[0].path = slot_path_prefix
+        return node.inputs[0]
+
+    if hasattr(node, "directory"):
+        node.directory = base_path
+        if hasattr(node, "file_name"):
+            node.file_name = slot_path_prefix
+
+        output_item, input_socket = _ensure_file_output_item(node, socket_type, "Image")
+        output_item.override_node_format = True
+        output_item.format.file_format = "OPEN_EXR"
+        output_item.format.color_mode = color_mode
+        output_item.format.color_depth = "16"
+        output_item.format.exr_codec = "ZIP"
+
+        if hasattr(output_item, "save_as_render"):
+            output_item.save_as_render = False
+        if hasattr(node, "save_as_render"):
+            node.save_as_render = False
+
+        return input_socket
+
+    raise ExportWorkflowError(
+        "Compositor File Output node API is unsupported in this Blender build. "
+        f"Available attrs: {', '.join(sorted(name for name in dir(node) if not name.startswith('_')))}"
+    )
+
+
+def _ensure_file_output_item(node, socket_type, item_name):
+    items = getattr(node, "file_output_items", None)
+    if items is None:
+        raise ExportWorkflowError("File Output node does not expose file_output_items in this Blender build.")
+
+    if len(items) == 0:
+        items.new(socket_type, item_name)
+    else:
+        existing = items[0]
+        if hasattr(existing, "socket_type") and existing.socket_type != socket_type:
+            items.clear()
+            items.new(socket_type, item_name)
+        elif hasattr(existing, "name") and existing.name != item_name:
+            existing.name = item_name
+
+    for socket in node.inputs:
+        if getattr(socket, "name", "") == item_name:
+            return items[0], socket
+
+    if len(node.inputs) > 0:
+        return items[0], node.inputs[0]
+
+    raise ExportWorkflowError("File Output node did not expose a usable input socket.")
 
 
 def _find_compositor_output_socket(render_layers_node, aliases):
@@ -1966,49 +2942,274 @@ def _compute_total_sampled_frame_count(start_frame, end_frame, frame_drop_step):
     return int((frame_span + step - 1) // step)
 
 
-def _export_mesh_fbx(context, prepared):
+def _export_mesh_fbx(context, prepared, temp_state, settings, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
     filename = f"{prepared.asset_name}.fbx"
     mesh_path = os.path.join(prepared.output_directory, filename)
-    view_layer = context.view_layer
+    scene = temp_state.scene
+    view_layer = scene.view_layers[0]
+    eval_frame = int(settings.end_frame)
 
-    previous_selection = [obj for obj in view_layer.objects if obj.select_get()]
-    previous_active = view_layer.objects.active
-
-    export_objects = [obj for obj in prepared.source_objects if obj.name in prepared.source_scene.objects]
-    if not export_objects:
-        raise ExportWorkflowError("No exportable source object was found for FBX export.")
+    previous_window_scene = context.window.scene if context.window else None
+    previous_frame = scene.frame_current
+    previous_selection = []
+    previous_active = None
+    renamed_conflicts = []
+    export_object = None
+    show_export_identifier = None
+    previous_show_export_value = None
+    skip_grid_identifier = None
+    previous_skip_grid_value = None
+    uv_name_identifier = None
+    previous_uv_name_value = None
 
     try:
+        if context.window:
+            context.window.scene = scene
+
+        previous_selection = [obj for obj in scene.objects if obj.select_get()]
+        previous_active = view_layer.objects.active
+        scene.frame_set(eval_frame)
+
         if context.mode != "OBJECT":
             try:
-                bpy.ops.object.mode_set(mode="OBJECT")
+                with context.temp_override(scene=scene, view_layer=view_layer):
+                    bpy.ops.object.mode_set(mode="OBJECT")
             except RuntimeError:
                 pass
 
-        bpy.ops.object.select_all(action="DESELECT")
-        for obj in export_objects:
-            obj.select_set(True)
-        view_layer.objects.active = export_objects[0]
-
-        result = bpy.ops.export_scene.fbx(
-            filepath=mesh_path,
-            use_selection=True,
-            bake_anim=False,
-            add_leaf_bones=False,
+        resolved = _resolve_input_socket_identifiers(prepared.node_group)
+        show_export_identifier = _find_show_export_mesh_identifier(prepared.node_group)
+        uv_name_identifier = _find_uv_name_identifier(prepared.node_group)
+        skip_grid_identifier = _find_socket_identifier(
+            resolved,
+            ("SkipGridTransfer", "Skip Grid Transfer"),
         )
+
+        if show_export_identifier:
+            previous_show_export_value = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                show_export_identifier,
+            )
+        if uv_name_identifier:
+            previous_uv_name_value = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                uv_name_identifier,
+            )
+        if skip_grid_identifier:
+            previous_skip_grid_value = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                skip_grid_identifier,
+            )
+
+        _set_skip_grid_transfer(prepared.node_group, temp_state.gn_modifier, False, report)
+        _set_uv_name_input(prepared.node_group, temp_state.gn_modifier, temp_state.selected_uv_name, reporter=report)
+        _set_show_export_mesh(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
+        scene.frame_set(eval_frame)
+
+        export_object = temp_state.helper_object.copy()
+        if temp_state.helper_object.data is not None:
+            export_object.data = temp_state.helper_object.data.copy()
+        export_object.animation_data_clear()
+        scene.collection.objects.link(export_object)
+
+        renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
+        export_object.name = prepared.asset_name
+
+        export_modifier = _find_nodes_modifier(export_object, constants.TEMP_GN_MODIFIER_NAME)
+        if export_modifier is None:
+            raise ExportWorkflowError("Geometry Nodes modifier was not found on VAT_HelperPlane for FBX export.")
+
+        _set_skip_grid_transfer(prepared.node_group, export_modifier, False, report)
+        _set_uv_name_input(prepared.node_group, export_modifier, temp_state.selected_uv_name, reporter=report)
+        _set_show_export_mesh(prepared.node_group, export_modifier, True, reporter=report)
+        scene.frame_set(eval_frame)
+
+        for modifier in list(export_object.modifiers):
+            _select_only_object_in_scene(context, scene, view_layer, export_object)
+            with context.temp_override(
+                scene=scene,
+                view_layer=view_layer,
+                active_object=export_object,
+                object=export_object,
+                selected_objects=[export_object],
+                selected_editable_objects=[export_object],
+            ):
+                result = bpy.ops.object.modifier_apply(modifier=modifier.name)
+            if "FINISHED" not in result:
+                raise ExportWorkflowError(
+                    f"Failed to apply modifier '{modifier.name}' on VAT_HelperPlane for FBX export."
+                )
+
+        _ensure_export_mesh_uv_layer(export_object, temp_state.selected_uv_name, _get_uv_map_index(settings))
+
+        if getattr(export_object, "data", None) is None or len(export_object.data.vertices) == 0:
+            raise ExportWorkflowError("Export mesh is empty after applying VAT_HelperPlane modifiers.")
+
+        _select_only_object_in_scene(context, scene, view_layer, export_object)
+        with context.temp_override(
+            scene=scene,
+            view_layer=view_layer,
+            active_object=export_object,
+            object=export_object,
+            selected_objects=[export_object],
+            selected_editable_objects=[export_object],
+        ):
+            result = bpy.ops.export_scene.fbx(
+                filepath=mesh_path,
+                use_selection=True,
+                bake_anim=False,
+                add_leaf_bones=False,
+            )
         if "FINISHED" not in result:
             raise ExportWorkflowError("FBX export did not complete successfully.")
     except RuntimeError as exc:
         raise ExportWorkflowError(f"FBX export failed: {exc}") from exc
     finally:
-        bpy.ops.object.select_all(action="DESELECT")
-        for obj in previous_selection:
-            if obj.name in prepared.source_scene.objects:
-                obj.select_set(True)
-        if previous_active and previous_active.name in prepared.source_scene.objects:
-            view_layer.objects.active = previous_active
+        if export_object is not None:
+            export_mesh_data = export_object.data
+            try:
+                bpy.data.objects.remove(export_object, do_unlink=True)
+            except Exception:
+                pass
+            if export_mesh_data is not None and getattr(export_mesh_data, "users", 0) == 0:
+                try:
+                    bpy.data.meshes.remove(export_mesh_data, do_unlink=True)
+                except Exception:
+                    pass
+
+        _restore_reserved_object_names(renamed_conflicts)
+
+        if show_export_identifier:
+            try:
+                temp_state.gn_modifier[show_export_identifier] = bool(previous_show_export_value)
+            except Exception:
+                pass
+        if uv_name_identifier and previous_uv_name_value is not None:
+            try:
+                temp_state.gn_modifier[uv_name_identifier] = str(previous_uv_name_value)
+            except Exception:
+                pass
+        if skip_grid_identifier:
+            try:
+                temp_state.gn_modifier[skip_grid_identifier] = bool(previous_skip_grid_value)
+            except Exception:
+                pass
+
+        if context.window:
+            context.window.scene = scene
+        try:
+            _restore_scene_object_selection(scene, view_layer, previous_selection, previous_active)
+        except Exception:
+            pass
+        scene.frame_set(previous_frame)
+
+        if context.window and previous_window_scene:
+            context.window.scene = previous_window_scene
 
     return mesh_path
+
+
+def _find_nodes_modifier(obj, preferred_name=None):
+    if obj is None:
+        return None
+
+    if preferred_name:
+        modifier = obj.modifiers.get(preferred_name)
+        if modifier is not None and modifier.type == "NODES":
+            return modifier
+
+    for modifier in obj.modifiers:
+        if modifier.type == "NODES":
+            return modifier
+    return None
+
+
+def _ensure_export_mesh_uv_layer(obj, preferred_name, fallback_index=0):
+    if obj is None or getattr(obj, "type", None) != "MESH" or getattr(obj, "data", None) is None:
+        raise ExportWorkflowError("A mesh object is required when preparing export UV layers.")
+
+    uv_layers = getattr(obj.data, "uv_layers", None)
+    if uv_layers is None:
+        raise ExportWorkflowError(f"Object '{obj.name}' does not support UV layers.")
+
+    desired_name = str(preferred_name or "").strip() or _default_uv_layer_name(max(0, int(fallback_index)))
+    existing_layer = uv_layers.get(desired_name)
+    if existing_layer is not None:
+        return str(existing_layer.name)
+
+    if len(uv_layers) == 0:
+        created_layer = uv_layers.new(name=desired_name)
+        if created_layer is None:
+            raise ExportWorkflowError(f"Failed to create export UV layer '{desired_name}' on object '{obj.name}'.")
+        return str(created_layer.name)
+
+    source_index = max(0, min(int(fallback_index), len(uv_layers) - 1))
+    source_layer = uv_layers[source_index]
+    created_layer = uv_layers.new(name=desired_name)
+    if created_layer is None:
+        raise ExportWorkflowError(f"Failed to create export UV layer '{desired_name}' on object '{obj.name}'.")
+
+    try:
+        source_data = source_layer.data
+        target_data = created_layer.data
+        for index in range(min(len(source_data), len(target_data))):
+            target_data[index].uv = source_data[index].uv
+    except Exception:
+        pass
+
+    return str(created_layer.name)
+
+
+def _select_only_object_in_scene(context, scene, view_layer, target_object):
+    if context.window:
+        context.window.scene = scene
+
+    for obj in scene.objects:
+        obj.select_set(False)
+
+    target_object.select_set(True)
+    view_layer.objects.active = target_object
+
+
+def _restore_scene_object_selection(scene, view_layer, previous_selection, previous_active):
+    for obj in scene.objects:
+        obj.select_set(False)
+
+    for obj in previous_selection:
+        restored = scene.objects.get(obj.name)
+        if restored is None:
+            continue
+        restored.select_set(True)
+
+    if previous_active:
+        restored_active = scene.objects.get(previous_active.name)
+        if restored_active is not None:
+            view_layer.objects.active = restored_active
+
+
+def _reserve_exact_object_name(target_name, exclude_object=None):
+    renamed_conflicts = []
+    for obj in bpy.data.objects:
+        if exclude_object is not None and obj == exclude_object:
+            continue
+        if obj.name != target_name:
+            continue
+        temporary_name = _unique_name(f"{target_name}_Temp", bpy.data.objects.keys())
+        obj.name = temporary_name
+        renamed_conflicts.append((obj, target_name))
+    return renamed_conflicts
+
+
+def _restore_reserved_object_names(renamed_conflicts):
+    for obj, original_name in reversed(renamed_conflicts):
+        try:
+            obj.name = original_name
+        except Exception:
+            pass
 
 
 def _create_or_overwrite_named_scene(scene_name):
@@ -2054,28 +3255,6 @@ def _unique_name(base_name, existing_names):
         if candidate not in existing_names:
             return candidate
         index += 1
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

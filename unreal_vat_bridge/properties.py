@@ -1,4 +1,4 @@
-﻿import bpy
+import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, PropertyGroup
 
@@ -36,6 +36,12 @@ class UVB_PG_settings(PropertyGroup):
         default=1,
         min=1,
         soft_max=120,
+    )
+    uv_map_index: IntProperty(
+        name="UV Index",
+        default=0,
+        min=0,
+        max=3,
     )
 
     vertex_use_collection: BoolProperty(name="Use Collection", default=False)

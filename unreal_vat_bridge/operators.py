@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import traceback
 
 import bpy
