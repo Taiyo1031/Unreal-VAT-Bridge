@@ -20,9 +20,9 @@ class UVB_PG_settings(PropertyGroup):
         subtype="DIR_PATH",
         default="//VAT_Exports",
     )
-    show_output_json: BoolProperty(name="Show Exported JSON", default=False)
+    show_output_json: BoolProperty(name="Show Exported Metadata JSON", default=False)
     last_exported_json_text: StringProperty(
-        name="Exported JSON",
+        name="Exported Metadata JSON",
         description="Last exported JSON payload",
         default="",
         options={"TEXTEDIT_UPDATE"},
@@ -81,7 +81,7 @@ class UVB_PG_settings(PropertyGroup):
         default="SEPARATE_FILES",
     )
 
-    export_json_metadata: BoolProperty(name="Export JSON Metadata", default=False)
+    export_json_metadata: BoolProperty(name="Export Metadata JSON", default=False)
     export_mesh_file: BoolProperty(name="Export Mesh File", default=False)
 
     texture_prefix: StringProperty(name="Texture Prefix", default="T_")

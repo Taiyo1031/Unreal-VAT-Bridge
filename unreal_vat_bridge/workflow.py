@@ -395,6 +395,47 @@ def _get_uv_map_index(settings):
     return max(0, min(3, value))
 
 
+def _get_vat_mode_index(settings):
+    mode = str(getattr(settings, "export_mode", constants.EXPORT_MODE_VERTEX))
+    if mode == constants.EXPORT_MODE_RIGID:
+        return 1
+    return 0
+
+
+def _json_vector3(value):
+    if value is None:
+        raise ExportWorkflowError("Expected vector value for JSON export, got None.")
+
+    try:
+        x = float(value[0])
+        y = float(value[1])
+        z = float(value[2])
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Expected a 3D vector value for JSON export, got {value!r}."
+        ) from exc
+
+    # Match Unreal-style FVector field names for direct JSON deserialization.
+    return {
+        "X": x,
+        "Y": y,
+        "Z": z,
+    }
+
+
+def _json_texture_size_value(width, height):
+    width = int(width)
+    height = int(height)
+    if width <= 0 or height <= 0:
+        raise ExportWorkflowError(
+            f"Expected positive texture size for JSON export, got {width} x {height}."
+        )
+
+    # TextureSize is validated as square earlier in the workflow, so Unreal-side
+    # consumers can treat this as a single scalar value.
+    return float(width)
+
+
 def _create_reference_frame_object(context, temp_scene, source_copy_objects, reference_frame):
     previous_window_scene = context.window.scene if context.window else None
     generated_parts = []
@@ -2890,7 +2931,7 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
     filename = f"{prepared.asset_name}_VAT.json"
     json_path = os.path.join(prepared.output_directory, filename)
 
-    total_frame_count = _compute_total_sampled_frame_count(
+    duration = _compute_total_sampled_frame_count(
         int(settings.start_frame),
         int(settings.end_frame),
         int(prepared.frame_drop_step),
@@ -2913,20 +2954,22 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         )
 
     payload = {
-        "total_frame_count": total_frame_count,
-        "blender_fps": float(prepared.source_fps),
-        "frame_drop_step": int(prepared.frame_drop_step),
+        "Vat_NumFrames": duration,
+        "VatMode": _get_vat_mode_index(settings),
+        "Vat_UVIndex": _get_uv_map_index(settings),
+        "Vat_OriginalFPS": float(prepared.source_fps),
+        "Vat_FrameStepping": int(prepared.frame_drop_step),
         "exported_texture_names": [
             os.path.basename(position_texture),
             os.path.basename(normal_texture),
         ],
         "exported_object_names": [obj.name for obj in prepared.source_objects],
-        "texture_resolution": {
-            "width": int(prepared.export_texture_width),
-            "height": int(prepared.export_texture_height),
-        },
-        "geometry_nodes_min": min_value,
-        "geometry_nodes_max": max_value,
+        "Vat_TextureSize": _json_texture_size_value(
+            prepared.export_texture_width,
+            prepared.export_texture_height,
+        ),
+        "Vat_PositionRangeMin": _json_vector3(min_value),
+        "Vat_PositionRangeMax": _json_vector3(max_value),
     }
 
     json_text = json.dumps(payload, indent=2)
@@ -3255,13 +3298,6 @@ def _unique_name(base_name, existing_names):
         if candidate not in existing_names:
             return candidate
         index += 1
-
-
-
-
-
-
-
 
 
 

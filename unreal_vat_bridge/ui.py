@@ -67,15 +67,15 @@ class UVB_PT_main(Panel):
         json_header = output_box.row(align=True)
         json_icon = "TRIA_DOWN" if settings.show_output_json else "TRIA_RIGHT"
         json_header.prop(settings, "show_output_json", text="", emboss=False, icon=json_icon)
-        json_header.label(text="Exported JSON")
+        json_header.label(text="Exported Metadata JSON")
 
         if settings.show_output_json:
             json_box = output_box.box()
             if settings.last_exported_json_text:
                 json_box.prop(settings, "last_exported_json_text", text="")
-                json_box.operator("unreal_vat_bridge.copy_last_json", text="Copy JSON")
+                json_box.operator("unreal_vat_bridge.copy_last_json", text="Copy Metadata JSON")
             else:
-                json_box.label(text="No exported JSON available.")
+                json_box.label(text="No exported metadata JSON available.")
 
         image_box = layout.box()
         image_box.label(text="Image Export Settings")
@@ -94,7 +94,7 @@ class UVB_PT_main(Panel):
 
         options_box = layout.box()
         options_box.label(text="Export Options")
-        options_box.prop(settings, "export_json_metadata", text="Export JSON Metadata")
+        options_box.prop(settings, "export_json_metadata", text="Export Metadata JSON")
         options_box.prop(settings, "export_mesh_file", text="Export Mesh File")
 
         summary_box = options_box.box()

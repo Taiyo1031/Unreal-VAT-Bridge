@@ -1,0 +1,517 @@
+# Unreal VAT Bridge Project Spec
+
+## Purpose
+
+This repository contains a Blender 5.1 add-on for exporting Vertex Animation Texture data for Unreal Engine.
+
+The add-on is designed as a UI-first workflow:
+
+- choose a source object or collection
+- bake/evaluate Geometry Nodes in a temporary compute scene
+- export VAT textures
+- optionally export JSON metadata
+- optionally export an FBX mesh derived from the helper object
+
+This file is the handoff document for future contributors, including other AI agents.
+
+When behavior changes, this file should be updated in the same change set.
+
+## Source Of Truth
+
+- Add-on package: [unreal_vat_bridge](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge)
+- Main workflow implementation: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py)
+- Blender Geometry Nodes asset: [vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend)
+- Packaging script: [package.sh](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/package.sh)
+
+## Current Target Environment
+
+- Blender: `5.1.x`
+- Add-on entry point: [__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py)
+- Current workflow build id is defined in [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py)
+
+## Repository Layout
+
+- [README.md](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/README.md): very short project readme
+- [PROJECT_SPEC.md](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/PROJECT_SPEC.md): this document
+- [package.sh](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/package.sh): creates installable zip
+- [unreal_vat_bridge/__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py): Blender add-on registration and `bl_info`
+- [unreal_vat_bridge/constants.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/constants.py): names, modes, temp object identifiers, suffixes
+- [unreal_vat_bridge/properties.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/properties.py): scene property group
+- [unreal_vat_bridge/ui.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/ui.py): sidebar UI
+- [unreal_vat_bridge/operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py): export operator and JSON copy operator
+- [unreal_vat_bridge/preview.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/preview.py): preview math for texture sizing
+- [unreal_vat_bridge/workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py): end-to-end export system
+- [unreal_vat_bridge/assets/vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend): Geometry Nodes groups used at runtime
+
+## User-Facing UI
+
+The add-on panel lives in:
+
+- `View3D > Sidebar > Unreal VAT Bridge`
+
+The UI implementation is part of the project spec and should be kept in sync with code changes.
+
+The property definitions live in [properties.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/properties.py) and the drawing logic lives in [ui.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/ui.py).
+
+### Panel Structure
+
+Current panels:
+
+- main panel: `UVB_PT_main`
+- child panel: `UVB_PT_advanced`
+- child panel: `UVB_PT_custom_attributes`
+
+### Main Panel Layout
+
+The main panel currently renders these sections in order:
+
+1. `Mode`
+2. `Source`
+3. `Frame Settings`
+4. `Output`
+5. `Image Export Settings`
+6. `Export Options`
+7. `Export Action`
+8. `Future Panels Placeholder`
+
+### Mode Section
+
+Current field:
+
+- `Export Mode`
+
+### Source Section
+
+This section is mode-dependent.
+
+In `VERTEX` mode:
+
+- `Use Collection`
+- if `Use Collection = True`: `Source Collection`
+- otherwise: `Source Object`
+
+In `RIGID` mode:
+
+- `Source Type`
+- if `Source Type = SINGLE_OBJECT`: `Source Object`
+- otherwise: `Source Collection`
+
+### Frame Settings Section
+
+Current fields:
+
+- `Start Frame`
+- `End Frame`
+- `Reference Frame`
+- `UV Index`
+- `Source FPS` as read-only label
+- `FPS Dropping`
+
+Compatibility note:
+
+- if an older Blender session still holds a stale property group and `uv_map_index` is missing, the UI currently shows `UV Index: 0 (reload addon)` instead of failing
+- if `frame_drop_step` is missing, the UI shows `FPS Dropping: unavailable (reload addon)`
+
+### Output Section
+
+Current fields:
+
+- `Output Directory`
+- collapsible `Exported Metadata JSON` viewer
+
+The JSON viewer currently behaves as follows:
+
+- collapsed by default unless `show_output_json = True`
+- if export metadata exists, show the last JSON text and a `Copy Metadata JSON` button
+- otherwise show `No exported metadata JSON available.`
+
+### Image Export Settings Section
+
+This section is currently informational and read-only in the UI.
+
+Displayed fields:
+
+- `Texture Format`
+- `Pixel Type`
+- `Compression`
+- `Attribute Output`
+
+All rows are disabled because the export path is currently fixed by implementation.
+
+### Export Options Section
+
+Current options:
+
+- `Export Metadata JSON`
+- `Export Mesh File`
+
+This section also contains a read-only summary box showing:
+
+- `Texture Format: EXR`
+- `Default Pixel Type: Half Float`
+- `Default Compression: ZIP`
+- `Attribute Textures: Separate Files`
+
+### Export Action Section
+
+Current action:
+
+- `Export` button bound to `unreal_vat_bridge.export`
+
+### Advanced Panel
+
+The `Advanced` child panel currently exposes:
+
+- `Texture Prefix`
+- `Texture Naming Pattern`
+- `Keep Temporary Scene` as disabled/read-only
+
+It also shows the note:
+
+- `Temporary scene is currently retained for debug.`
+
+### Custom Attributes Panel
+
+The `Custom Attributes` child panel is currently placeholder UI only.
+
+It shows:
+
+- `Future extension area for custom attributes.`
+- `Built-in exports currently: Position, Normal.`
+
+### Current UI Property Set
+
+Important settings currently exposed somewhere in the UI:
+
+- `Export Mode`
+- source object or source collection
+- `Start Frame`
+- `End Frame`
+- `Reference Frame`
+- `FPS Dropping`
+- `UV Index`
+- `Output Directory`
+- `Export Metadata JSON`
+- `Export Mesh File`
+- `Texture Prefix`
+- `Texture Naming Pattern`
+
+## High-Level Runtime Flow
+
+The main entry point is `UVB_OT_export.execute()` in [operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py), which reloads [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py) and calls `run_export(...)`.
+
+`run_export(...)` currently performs:
+
+1. clear old runtime-appended Geometry Nodes groups
+2. validate UI settings and prepare export metadata
+3. create a temporary compute scene
+4. duplicate source objects into the temp scene
+5. generate a static reference-frame object
+6. create a helper plane with a Geometry Nodes modifier
+7. push UI values into the Geometry Nodes modifier inputs
+8. run the Geometry Nodes bake operator
+9. move to the end frame and read export-critical attributes
+10. export Position and Normal textures
+11. optionally export JSON metadata
+12. optionally export FBX mesh
+
+Key functions:
+
+- `run_export`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L68)
+- `_validate_and_prepare`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L140)
+- `_create_temporary_scene`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L236)
+- `_apply_ui_values_to_gn_transfer_layer`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L480)
+- `_bake_geometry_nodes_animation_node`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L700)
+- `_apply_end_frame_export_settings`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L865)
+- `_export_rendered_textures`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L1888)
+- `_export_json_metadata`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L2889)
+- `_export_mesh_fbx`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L2945)
+
+## Temporary Scene System
+
+The add-on builds a dedicated compute scene for export.
+
+Important temporary objects:
+
+- temp scene name: `VAT_Compute_Scene`
+- camera: `VAT_ComputeCamera`
+- helper plane: `VAT_HelperPlane`
+- Geometry Nodes modifier: `VAT_GeometryNodes`
+- reference object name pattern: `VAT_RefFrameOBJ`
+
+The temp scene is currently retained for debugging instead of being fully deleted at the end.
+
+## Geometry Nodes Contract
+
+The Python side expects specific GN group names from [vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend):
+
+- `ComputeVertexVAT`
+- `ComputeRigidVAT`
+
+Current important input sockets on `ComputeVertexVAT`:
+
+- `WhatToShow`
+- `UseCollection`
+- `ShowExportMesh`
+- `SkipGridTransfer`
+- `Start Frame`
+- `End Frame`
+- `Reference Frame`
+- `FrameDropStep`
+- `UVName`
+- `RefFrameOBJ`
+- `Collection`
+- `Object`
+
+Python side currently resolves socket identifiers by normalized names instead of hardcoding exact identifiers, so small naming variants are tolerated as long as the normalized label remains compatible.
+
+Relevant helpers:
+
+- `_resolve_input_socket_identifiers`
+- `_find_socket_identifier`
+- `_set_what_to_show_mode`
+- `_set_uv_name_input`
+- `_set_show_export_mesh`
+- `_set_skip_grid_transfer`
+
+## Attribute And Bake Contract
+
+The workflow reads these Geometry Nodes outputs/attributes during export:
+
+- `TextureSize`
+- `min`
+- `max`
+- `cameraorthoscale` or `cameraortho`
+- `cameralocation` or `cameraposition`
+- `DisplayAttribute`
+- `PosDefrence`
+- `Normal/UVOffset`
+- `UVMap`
+
+The code intentionally toggles `SkipGridTransfer` during different phases:
+
+- `True` during attribute-safe readback where possible
+- `False` when GN attribute fallback is needed
+
+This is sensitive and should be changed carefully.
+
+## Texture Export Spec
+
+### Current Behavior
+
+Texture export no longer depends on final render output in the normal path.
+
+The current preferred path is:
+
+1. set `WhatToShow`
+2. realize helper output to mesh through a probe GN group
+3. read `DisplayAttribute` directly from realized geometry
+4. rasterize the realized quads into pixels in Python
+5. save a float EXR image directly
+
+This direct texel path was introduced to avoid black edge artifacts caused by render/compositor sampling.
+
+If direct texel export fails, the code still has a render-based fallback path.
+
+### Current Export Outputs
+
+- Position texture suffix: `_Position.exr`
+- Normal texture suffix: `_Normal.exr`
+
+### Current Image Settings
+
+The intended EXR output settings are:
+
+- file format: `OPEN_EXR`
+- color: `RGBA`
+- color depth: `16-bit float`
+- codec: `ZIP`
+
+The direct image save path currently produces standard `R/G/B/A` EXR channels, not Blender multipart-style `Image.R` channel names.
+
+## UV Handling Spec
+
+### UI Setting
+
+`UV Index` is an integer input with:
+
+- default: `0`
+- allowed range: `0-3`
+
+### Current Behavior
+
+Before export, the temp duplicated source meshes are normalized so the selected UV slot exists.
+
+Rules:
+
+- if the requested UV layer index does not exist, missing UV layers are created
+- the selected layer name becomes the canonical UV name for the export
+- all temp duplicated source meshes are aligned to that UV name
+- the reference frame mesh is also ensured to carry that UV layer
+- Geometry Nodes `UVName` input is filled with the resolved UV layer name
+
+If an old Blender session still holds a stale property group without `uv_map_index`, Python falls back to `0` instead of crashing.
+
+## FBX Export Spec
+
+### Current Intended Behavior
+
+The FBX export should use the helper-plane-based Geometry Nodes output, not the reference object.
+
+Current implementation:
+
+1. go to end frame
+2. set helper modifier inputs:
+   - `ShowExportMesh = True`
+   - `SkipGridTransfer = False`
+   - `UVName = selected UV name`
+3. duplicate `VAT_HelperPlane`
+4. apply all modifiers on the duplicated helper object
+5. ensure the resulting mesh contains the requested export UV layer
+6. export that duplicated helper-derived mesh as FBX
+
+This means the FBX should represent the final Geometry Nodes export mesh, not the original source mesh and not `VAT_RefFrameOBJ`.
+
+Relevant function:
+
+- `_export_mesh_fbx`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L2945)
+
+## JSON Export Spec
+
+Optional JSON export includes:
+
+- `Vat_NumFrames`
+- `VatMode`
+  `0` = Vertex, `1` = Rigid
+- `Vat_UVIndex`
+- `Vat_OriginalFPS`
+- `Vat_FrameStepping`
+- exported texture names
+- exported object names
+- `Vat_TextureSize`
+- `Vat_PositionRangeMin`
+- `Vat_PositionRangeMax`
+
+`Vat_TextureSize` is exported as a single float scalar, not a `{width, height}` object, because the workflow validates square textures before export.
+
+Example:
+
+```json
+"Vat_TextureSize": 256.0
+```
+
+Vector fields in JSON use Unreal-friendly object form instead of arrays:
+
+```json
+"Vat_PositionRangeMin": { "X": -1.0, "Y": -1.0, "Z": -1.0 },
+"Vat_PositionRangeMax": { "X": 1.0, "Y": 1.0, "Z": 1.0 }
+```
+
+This is intended to map cleanly onto Unreal-side `FVector` parsing without needing array-to-struct conversion first.
+
+## Preview / Sizing Logic
+
+Preview and texture sizing logic are currently simple and live in [preview.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/preview.py).
+
+Current logic:
+
+- count exported elements
+- compute sampled frame count from frame range and `frame_drop_step`
+- estimate width and height as a near-square texture
+
+This is estimation only. Actual final resolution is driven by Geometry Nodes `TextureSize` when available.
+
+## Packaging And Installation
+
+Create the distributable zip by running:
+
+```bash
+./package.sh
+```
+
+It produces:
+
+- [dist/unreal_vat_bridge.zip](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/dist/unreal_vat_bridge.zip)
+
+Important packaging constraints:
+
+- zip the `unreal_vat_bridge` folder, not the whole repo
+- exclude cache files and temporary macOS files
+- keep Python files as normal UTF-8 without BOM
+
+## Recent Implementation Decisions
+
+These are important because they explain why the code looks the way it does now.
+
+### Add-on Detection
+
+The add-on previously failed to appear in Blender because of UTF-8 BOM issues in Python files. This was fixed by stripping BOM.
+
+### Blender 5.1 Compositor API
+
+There were API differences around compositor file output nodes in Blender 5.1. Compatibility helpers were added for old and new APIs.
+
+### Black Edge Artifact
+
+Render/compositor-based texture generation caused visible black lines. Direct texel export from realized GN geometry is now the preferred path to avoid sampling artifacts.
+
+### `WhatToShow` Contract
+
+Texture export relies on `WhatToShow`:
+
+- `Position`
+- `Normal/UVOffset`
+
+### Helper-Based FBX Export
+
+FBX export now targets the helper object path, because that is the object actually carrying the final Geometry Nodes export mesh.
+
+## Known Sensitive Areas
+
+These areas are easy to break:
+
+- normalized GN socket-name matching
+- Geometry Nodes bake invocation
+- toggling `SkipGridTransfer`
+- reading realized attributes from helper output
+- direct texel rasterization assumptions
+- UV layer name propagation
+- helper-based FBX export after enabling `ShowExportMesh`
+
+When changing any of these, test inside Blender instead of relying only on static reasoning.
+
+## Known Non-Source Files
+
+These exist in the repo but are not the main source of truth:
+
+- [unreal_vat_bridge/workflow.py.bak](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py.bak)
+- [unreal_vat_bridge/assets/vat_nodes.blend1](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend1)
+- `__pycache__` files
+- generated zip in `dist/`
+
+Avoid treating those as the primary implementation unless doing recovery work.
+
+## Update Policy For Future Changes
+
+Whenever behavior changes, update this file in the same task.
+
+At minimum, update:
+
+- current behavior description
+- any changed workflow steps
+- any changed GN socket or attribute contract
+- any changed export format or file naming
+- any new caveat or limitation
+- any new debugging or packaging rule
+
+## Suggested Validation Checklist
+
+When making workflow changes, validate at least these:
+
+1. `python3 -m compileall unreal_vat_bridge`
+2. install or reload the add-on in Blender 5.1
+3. run a basic texture export
+4. verify Position and Normal textures are generated
+5. if FBX path changed, verify FBX export still succeeds
+6. if UV logic changed, test with missing UVs and non-zero UV index
+7. if GN socket logic changed, confirm the expected sockets still resolve
