@@ -8,7 +8,14 @@ bl_info = {
     "category": "Import-Export",
 }
 
+import importlib
+
 from . import operators, properties, ui
+
+if "bpy" in locals():
+    properties = importlib.reload(properties)
+    operators = importlib.reload(operators)
+    ui = importlib.reload(ui)
 
 
 def register():

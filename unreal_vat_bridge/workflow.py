@@ -11,7 +11,7 @@ import bpy
 from . import constants, preview
 
 UVB_RUNTIME_NODE_GROUP_PREFIX = "UVB_Runtime_"
-UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-01-helper-fbx-v14"
+UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-03-rbd-export-v16"
 WHAT_TO_SHOW_POSITION = "Position"
 WHAT_TO_SHOW_NORMAL = "Normal/UVOffset"
 WHAT_TO_SHOW_MENU_INDEX = {
@@ -60,7 +60,7 @@ class TempSceneState:
 @dataclass
 class ExportResult:
     position_texture: str
-    normal_texture: str
+    normal_texture: str | None
     json_path: str | None
     mesh_path: str | None
 
@@ -94,11 +94,15 @@ def run_export(context, settings, reporter=None):
             context,
             temp_state,
             prepared,
+            settings,
             int(settings.end_frame),
             report,
         )
 
-        report({"INFO"}, "Exporting Position/Normal textures...")
+        if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+            report({"INFO"}, "Exporting RBD position texture...")
+        else:
+            report({"INFO"}, "Exporting Position/Normal textures...")
         position_texture, normal_texture = _export_rendered_textures(context, prepared, temp_state, settings, report)
 
         json_path = None
@@ -164,7 +168,8 @@ def _validate_and_prepare(context, settings, reporter=None):
         source_collection,
     ) = _resolve_source_selection(context.scene, settings)
 
-    node_group_name = constants.GN_GROUP_BY_MODE[settings.export_mode]
+    export_mode = _get_export_mode(settings)
+    node_group_name = constants.GN_GROUP_BY_MODE[export_mode]
     node_group = _load_fresh_node_group_from_library(node_group_name, report)
 
     source_fps = preview.get_source_fps(context.scene)
@@ -191,7 +196,7 @@ def _validate_and_prepare(context, settings, reporter=None):
 
 
 def _resolve_source_selection(scene, settings):
-    if settings.export_mode == constants.EXPORT_MODE_VERTEX:
+    if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
         use_collection = bool(getattr(settings, "vertex_use_collection", False))
         if use_collection:
             collection = getattr(settings, "vertex_source_collection", None)
@@ -216,17 +221,9 @@ def _resolve_source_selection(scene, settings):
             raise ExportWorkflowError("Vertex Source Object must exist in the active scene.")
         return [obj], "OBJECT", obj.name, False, obj, None
 
-    if settings.rigid_source_type == constants.RIGID_SOURCE_TYPE_SINGLE:
-        obj = settings.rigid_source_object
-        if obj is None:
-            raise ExportWorkflowError("Source Object is required when Source Type is Single Object.")
-        if obj.name not in scene.objects:
-            raise ExportWorkflowError("Rigid Source Object must exist in the active scene.")
-        return [obj], "OBJECT", obj.name, False, obj, None
-
-    collection = settings.rigid_source_collection
+    collection = _get_rbd_source_collection(settings)
     if collection is None:
-        raise ExportWorkflowError("Source Collection is required when Source Type is Collection.")
+        raise ExportWorkflowError("Source Collection is required in RBD mode.")
     source_objects = [obj for obj in collection.objects if obj.name in scene.objects]
     if not source_objects:
         raise ExportWorkflowError("Source Collection has no objects in the active scene.")
@@ -395,9 +392,28 @@ def _get_uv_map_index(settings):
     return max(0, min(3, value))
 
 
-def _get_vat_mode_index(settings):
+def _get_export_mode(settings):
     mode = str(getattr(settings, "export_mode", constants.EXPORT_MODE_VERTEX))
-    if mode == constants.EXPORT_MODE_RIGID:
+    export_mode_rbd = getattr(constants, "EXPORT_MODE_RBD", "RBD")
+    if mode in ("RIGID", export_mode_rbd):
+        return export_mode_rbd
+    return mode
+
+def _get_rbd_source_collection(settings):
+    return getattr(
+        settings,
+        "rbd_source_collection",
+        getattr(settings, "rigid_source_collection", None),
+    )
+
+
+def _get_rbd_skip_scale(settings):
+    return bool(getattr(settings, "rbd_skip_scale", getattr(settings, "skip_scale", False)))
+
+
+def _get_vat_mode_index(settings):
+    mode = _get_export_mode(settings)
+    if mode == getattr(constants, "EXPORT_MODE_RBD", "RBD"):
         return 1
     return 0
 
@@ -434,6 +450,22 @@ def _json_texture_size_value(width, height):
     # TextureSize is validated as square earlier in the workflow, so Unreal-side
     # consumers can treat this as a single scalar value.
     return float(width)
+
+
+def _get_position_range_attribute_names(settings):
+    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+        return ("pos_min", "pos_max")
+    return ("min", "max")
+
+
+def _get_size_range_attribute_names(settings):
+    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+        return ("size_min", "size_max")
+    return ()
+
+
+def _exports_normal_texture(settings):
+    return _get_export_mode(settings) != constants.EXPORT_MODE_RBD
 
 
 def _create_reference_frame_object(context, temp_scene, source_copy_objects, reference_frame):
@@ -524,7 +556,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
     uv_map_index = _get_uv_map_index(settings)
 
     payload = {
-        "mode": settings.export_mode,
+        "mode": _get_export_mode(settings),
         "start_frame": settings.start_frame,
         "end_frame": settings.end_frame,
         "reference_frame": settings.reference_frame,
@@ -542,6 +574,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         "asset_name": prepared.asset_name,
         "show_export_mesh": False,
         "skip_grid_transfer": False,
+        "skip_scale": _get_rbd_skip_scale(settings),
     }
     gn_modifier["uvb_deferred_socket_payload"] = json.dumps(payload)
 
@@ -563,7 +596,17 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
     set_required("Start Frame", ("StartFrame", "Start Frame"), int(settings.start_frame))
     set_required("End Frame", ("EndFrame", "End Frame"), int(settings.end_frame))
     set_required("Reference Frame", ("ReferenceFrame", "Reference Frame"), int(settings.reference_frame))
-    set_required("Use Collection", ("UseCollection", "Use Collection"), bool(prepared.use_collection))
+    if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
+        set_required("Use Collection", ("UseCollection", "Use Collection"), bool(prepared.use_collection))
+    else:
+        use_collection_identifier = _find_socket_identifier(resolved, ("UseCollection", "Use Collection"))
+        if use_collection_identifier:
+            try:
+                gn_modifier[use_collection_identifier] = bool(prepared.use_collection)
+            except Exception as exc:
+                raise ExportWorkflowError(
+                    f"Failed to assign 'Use Collection' to Geometry Nodes input '{use_collection_identifier}': {exc}"
+                ) from exc
 
     set_required(
         "Frame Drop Step",
@@ -576,6 +619,8 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         temp_state.reference_object,
     )
     set_required("UV Name", ("UVName", "UV Name"), str(temp_state.selected_uv_name))
+    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+        _set_skip_scale(prepared.node_group, gn_modifier, _get_rbd_skip_scale(settings), reporter=report)
 
     if prepared.use_collection:
         set_required(
@@ -618,7 +663,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
     if required_missing:
         missing_text = ", ".join(required_missing)
         raise ExportWorkflowError(
-            "ComputeVertexVAT input sockets are missing: "
+            f"{prepared.node_group_name} input sockets are missing: "
             f"{missing_text}. Please match the fixed socket names."
         )
 
@@ -636,6 +681,14 @@ def _find_uv_name_identifier(node_group):
 def _find_show_export_mesh_identifier(node_group):
     resolved = _resolve_input_socket_identifiers(node_group)
     return _find_socket_identifier(resolved, ("ShowExportMesh", "Show Export Mesh"))
+
+
+def _find_skip_scale_identifier(node_group):
+    resolved = _resolve_input_socket_identifiers(node_group)
+    return _find_socket_identifier(
+        resolved,
+        ("SkipScale", "Skip Scale", "SkipScail", "Skip Scail"),
+    )
 
 
 def _set_what_to_show_mode(node_group, gn_modifier, mode_name, reporter=None, allow_missing=False):
@@ -703,6 +756,28 @@ def _set_show_export_mesh(node_group, gn_modifier, enabled, reporter=None, allow
     except Exception as exc:
         raise ExportWorkflowError(
             f"Failed to assign ShowExportMesh={bool(enabled)} to Geometry Nodes input '{identifier}': {exc}"
+        ) from exc
+
+    return identifier
+
+
+def _set_skip_scale(node_group, gn_modifier, enabled, reporter=None, allow_missing=False):
+    report = reporter if reporter else (lambda _level, _message: None)
+    identifier = _find_skip_scale_identifier(node_group)
+    if not identifier:
+        if allow_missing:
+            report({"WARNING"}, "SkipScale input was not found on Geometry Nodes group.")
+            return None
+        raise ExportWorkflowError(
+            "SkipScale input was not found on Geometry Nodes group. "
+            "Required for RBD export."
+        )
+
+    try:
+        gn_modifier[identifier] = bool(enabled)
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to assign SkipScale={bool(enabled)} to Geometry Nodes input '{identifier}': {exc}"
         ) from exc
 
     return identifier
@@ -903,9 +978,10 @@ def _evaluate_timeline_sequence(context, scene, start_frame, end_frame):
             context.window.scene = previous_window_scene
 
 
-def _apply_end_frame_export_settings(context, temp_state, prepared, end_frame, reporter=None):
+def _apply_end_frame_export_settings(context, temp_state, prepared, settings, end_frame, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
     end_frame = int(end_frame)
+    range_attr_names = _get_position_range_attribute_names(settings)
 
     report({"INFO"}, "Enabling SkipGridTransfer for attribute-safe readback.")
     _set_skip_grid_transfer(prepared.node_group, temp_state.gn_modifier, True, report)
@@ -919,8 +995,9 @@ def _apply_end_frame_export_settings(context, temp_state, prepared, end_frame, r
             end_frame,
             (
                 "texturesize",
-                "min",
-                "max",
+                range_attr_names[0],
+                range_attr_names[1],
+                *_get_size_range_attribute_names(settings),
                 "cameraorthoscale",
                 "cameraortho",
                 "cameralocation",
@@ -945,6 +1022,7 @@ def _apply_end_frame_export_settings(context, temp_state, prepared, end_frame, r
             context,
             temp_state,
             prepared,
+            settings,
             end_frame,
             report,
         )
@@ -1000,17 +1078,24 @@ def _apply_camera_settings_from_gn_attributes(context, temp_state, evaluate_fram
         report({"INFO"}, "Applied camera settings from End Frame Geometry Nodes attributes.")
 
 
-def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, evaluate_frame, reporter=None):
+def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, settings, evaluate_frame, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
     eval_frame = int(evaluate_frame)
+    min_attr_name, max_attr_name = _get_position_range_attribute_names(settings)
+    size_attr_names = _get_size_range_attribute_names(settings)
 
     attrs = getattr(prepared, "end_frame_attributes", {}) or {}
-    min_value = attrs.get("min")
-    max_value = attrs.get("max")
+    min_value = attrs.get(min_attr_name)
+    max_value = attrs.get(max_attr_name)
     if min_value is not None and max_value is not None:
-        return
+        if not size_attr_names:
+            return
+        if attrs.get(size_attr_names[0]) is not None and attrs.get(size_attr_names[1]) is not None:
+            return
 
-    report({"INFO"}, "min/max not found with SkipGridTransfer=True. Retrying with SkipGridTransfer=False...")
+    missing_labels = [min_attr_name, max_attr_name]
+    missing_labels.extend(size_attr_names)
+    report({"INFO"}, f"{', '.join(missing_labels)} not found with SkipGridTransfer=True. Retrying with SkipGridTransfer=False...")
     values_false = {}
 
     try:
@@ -1021,23 +1106,25 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, evaluate
             temp_state.scene,
             temp_state.helper_object,
             eval_frame,
-            ("min", "max"),
+            (min_attr_name, max_attr_name, *size_attr_names),
         )
     finally:
         _set_skip_grid_transfer(prepared.node_group, temp_state.gn_modifier, True, report)
         temp_state.scene.frame_set(eval_frame)
 
-    if "min" in values_false and attrs.get("min") is None:
-        attrs["min"] = values_false["min"]
-    if "max" in values_false and attrs.get("max") is None:
-        attrs["max"] = values_false["max"]
+    for attr_name in (min_attr_name, max_attr_name, *size_attr_names):
+        if attr_name in values_false and attrs.get(attr_name) is None:
+            attrs[attr_name] = values_false[attr_name]
 
     prepared.end_frame_attributes = attrs
 
-    min_value = attrs.get("min")
-    max_value = attrs.get("max")
-    if min_value is not None and max_value is not None:
-        report({"INFO"}, "Collected min/max from Geometry Nodes End Frame attributes.")
+    min_value = attrs.get(min_attr_name)
+    max_value = attrs.get(max_attr_name)
+    size_ok = True
+    if size_attr_names:
+        size_ok = attrs.get(size_attr_names[0]) is not None and attrs.get(size_attr_names[1]) is not None
+    if min_value is not None and max_value is not None and size_ok:
+        report({"INFO"}, f"Collected {', '.join(missing_labels)} from Geometry Nodes End Frame attributes.")
         return
 
     point_true = _list_available_attribute_names_on_evaluated_geometry(
@@ -1080,7 +1167,7 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, evaluate
     text_instance_false = ", ".join(instance_false) if instance_false else "(none)"
 
     raise ExportWorkflowError(
-        "Geometry Nodes attributes 'min' and 'max' were not found in End Frame readback. "
+        f"Geometry Nodes attributes {missing_labels!r} were not found in End Frame readback. "
         f"SkipGridTransfer=True -> Point: {text_point_true} | Instance(realized): {text_instance_true}. "
         f"SkipGridTransfer=False -> Point: {text_point_false} | Instance(realized): {text_instance_false}."
     )
@@ -1945,9 +2032,11 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
 
     prefix = _build_texture_prefix(settings, prepared.asset_name)
     position_filename = f"{prefix}_{constants.POSITION_SUFFIX}.exr"
-    normal_filename = f"{prefix}_{constants.NORMAL_SUFFIX}.exr"
     position_path = os.path.join(prepared.output_directory, position_filename)
-    normal_path = os.path.join(prepared.output_directory, normal_filename)
+    normal_path = None
+    if _exports_normal_texture(settings):
+        normal_filename = f"{prefix}_{constants.NORMAL_SUFFIX}.exr"
+        normal_path = os.path.join(prepared.output_directory, normal_filename)
 
     scene = temp_state.scene
     eval_frame = int(settings.end_frame)
@@ -1988,19 +2077,21 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
             WHAT_TO_SHOW_POSITION,
             reporter=report,
         )
-        _write_display_attribute_texture_from_geometry(
-            context,
-            scene,
-            temp_state,
-            prepared,
-            normal_path,
-            eval_frame,
-            WHAT_TO_SHOW_NORMAL,
-            reporter=report,
-        )
+        if normal_path:
+            _write_display_attribute_texture_from_geometry(
+                context,
+                scene,
+                temp_state,
+                prepared,
+                normal_path,
+                eval_frame,
+                WHAT_TO_SHOW_NORMAL,
+                reporter=report,
+            )
 
         report({"INFO"}, f"Direct Position EXR: {position_path}")
-        report({"INFO"}, f"Direct Normal EXR: {normal_path}")
+        if normal_path:
+            report({"INFO"}, f"Direct Normal EXR: {normal_path}")
         return position_path, normal_path
 
     finally:
@@ -2023,9 +2114,11 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
 
     prefix = _build_texture_prefix(settings, prepared.asset_name)
     position_filename = f"{prefix}_{constants.POSITION_SUFFIX}.exr"
-    normal_filename = f"{prefix}_{constants.NORMAL_SUFFIX}.exr"
     position_path = os.path.join(prepared.output_directory, position_filename)
-    normal_path = os.path.join(prepared.output_directory, normal_filename)
+    normal_path = None
+    if _exports_normal_texture(settings):
+        normal_filename = f"{prefix}_{constants.NORMAL_SUFFIX}.exr"
+        normal_path = os.path.join(prepared.output_directory, normal_filename)
 
     scene = temp_state.scene
     view_layer = scene.view_layers[0]
@@ -2128,30 +2221,34 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
             WHAT_TO_SHOW_POSITION,
             reporter=report,
         )
-        generated_normal = _render_display_attribute_texture(
-            context,
-            scene,
-            view_layer,
-            render_layers,
-            temp_state,
-            prepared,
-            prepared.output_directory,
-            normal_prefix,
-            eval_frame,
-            WHAT_TO_SHOW_NORMAL,
-            reporter=report,
-        )
+        generated_normal = None
+        if normal_path:
+            generated_normal = _render_display_attribute_texture(
+                context,
+                scene,
+                view_layer,
+                render_layers,
+                temp_state,
+                prepared,
+                prepared.output_directory,
+                normal_prefix,
+                eval_frame,
+                WHAT_TO_SHOW_NORMAL,
+                reporter=report,
+            )
 
         if os.path.exists(position_path):
             os.remove(position_path)
-        if os.path.exists(normal_path):
+        if normal_path and os.path.exists(normal_path):
             os.remove(normal_path)
 
         os.replace(generated_position, position_path)
-        os.replace(generated_normal, normal_path)
+        if normal_path and generated_normal:
+            os.replace(generated_normal, normal_path)
 
         report({"INFO"}, f"Rendered Position EXR: {position_path}")
-        report({"INFO"}, f"Rendered Normal EXR: {normal_path}")
+        if normal_path:
+            report({"INFO"}, f"Rendered Normal EXR: {normal_path}")
         return position_path, normal_path
 
     except RuntimeError as exc:
@@ -2940,18 +3037,25 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         context,
         temp_state,
         prepared,
+        settings,
         int(settings.end_frame),
         None,
     )
 
     end_frame_attrs = getattr(prepared, "end_frame_attributes", {}) or {}
-    min_value = end_frame_attrs.get("min")
-    max_value = end_frame_attrs.get("max")
+    pos_min_attr_name, pos_max_attr_name = _get_position_range_attribute_names(settings)
+    size_attr_names = _get_size_range_attribute_names(settings)
+    min_value = end_frame_attrs.get(pos_min_attr_name)
+    max_value = end_frame_attrs.get(pos_max_attr_name)
 
     if min_value is None or max_value is None:
         raise ExportWorkflowError(
-            "Geometry Nodes attributes 'min' and 'max' were not found in End Frame readback even after JSON-stage fallback."
+            f"Geometry Nodes attributes '{pos_min_attr_name}' and '{pos_max_attr_name}' were not found in End Frame readback even after JSON-stage fallback."
         )
+
+    texture_names = [os.path.basename(position_texture)]
+    if normal_texture:
+        texture_names.append(os.path.basename(normal_texture))
 
     payload = {
         "Vat_NumFrames": duration,
@@ -2959,10 +3063,7 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         "Vat_UVIndex": _get_uv_map_index(settings),
         "Vat_OriginalFPS": float(prepared.source_fps),
         "Vat_FrameStepping": int(prepared.frame_drop_step),
-        "exported_texture_names": [
-            os.path.basename(position_texture),
-            os.path.basename(normal_texture),
-        ],
+        "exported_texture_names": texture_names,
         "exported_object_names": [obj.name for obj in prepared.source_objects],
         "Vat_TextureSize": _json_texture_size_value(
             prepared.export_texture_width,
@@ -2971,6 +3072,16 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         "Vat_PositionRangeMin": _json_vector3(min_value),
         "Vat_PositionRangeMax": _json_vector3(max_value),
     }
+
+    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD and size_attr_names:
+        size_min_value = end_frame_attrs.get(size_attr_names[0])
+        size_max_value = end_frame_attrs.get(size_attr_names[1])
+        if size_min_value is None or size_max_value is None:
+            raise ExportWorkflowError(
+                f"Geometry Nodes attributes '{size_attr_names[0]}' and '{size_attr_names[1]}' are required for RBD JSON export."
+            )
+        payload["Vat_SizeRangeMin"] = _json_vector3(size_min_value)
+        payload["Vat_SizeRangeMax"] = _json_vector3(size_max_value)
 
     json_text = json.dumps(payload, indent=2)
     with open(json_path, "w", encoding="utf-8") as handle:
@@ -3298,14 +3409,3 @@ def _unique_name(base_name, existing_names):
         if candidate not in existing_names:
             return candidate
         index += 1
-
-
-
-
-
-
-
-
-
-
-

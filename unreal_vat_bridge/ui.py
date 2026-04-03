@@ -4,6 +4,17 @@ from bpy.types import Panel
 from . import constants, preview
 
 
+def _get_export_mode(settings):
+    mode = str(getattr(settings, "export_mode", constants.EXPORT_MODE_VERTEX))
+    export_mode_rbd = getattr(constants, "EXPORT_MODE_RBD", "RBD")
+    if mode in ("RIGID", export_mode_rbd):
+        return export_mode_rbd
+    return mode
+
+def _get_rbd_skip_scale(settings):
+    return bool(getattr(settings, "rbd_skip_scale", getattr(settings, "skip_scale", False)))
+
+
 class UVB_PT_main(Panel):
     bl_idname = "UVB_PT_main"
     bl_label = constants.ADDON_NAME
@@ -21,7 +32,7 @@ class UVB_PT_main(Panel):
 
         source_box = layout.box()
         source_box.label(text="Source")
-        if settings.export_mode == constants.EXPORT_MODE_VERTEX:
+        if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
             has_vertex_use_collection = hasattr(settings, "vertex_use_collection")
             use_collection = bool(getattr(settings, "vertex_use_collection", False))
 
@@ -35,11 +46,15 @@ class UVB_PT_main(Panel):
             else:
                 source_box.prop(settings, "vertex_source_object", text="Source Object")
         else:
-            source_box.prop(settings, "rigid_source_type", text="Source Type")
-            if settings.rigid_source_type == constants.RIGID_SOURCE_TYPE_SINGLE:
-                source_box.prop(settings, "rigid_source_object", text="Source Object")
+            if hasattr(settings, "rbd_source_collection"):
+                source_box.prop(settings, "rbd_source_collection", text="Source Collection")
             else:
                 source_box.prop(settings, "rigid_source_collection", text="Source Collection")
+
+            if hasattr(settings, "rbd_skip_scale"):
+                source_box.prop(settings, "rbd_skip_scale", text="Skip Scale")
+            else:
+                source_box.label(text=f"Skip Scale: {_get_rbd_skip_scale(settings)} (reload addon)")
 
         frame_box = layout.box()
         frame_box.label(text="Frame Settings")
@@ -145,7 +160,7 @@ class UVB_PT_custom_attributes(Panel):
     def draw(self, _context):
         layout = self.layout
         layout.label(text="Future extension area for custom attributes.")
-        layout.label(text="Built-in exports currently: Position, Normal.")
+        layout.label(text="Built-in exports currently depend on mode.")
 
 
 CLASSES = (

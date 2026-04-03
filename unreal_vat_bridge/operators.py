@@ -4,6 +4,8 @@ import traceback
 import bpy
 from bpy.types import Operator
 
+from . import constants as constants_module
+from . import preview as preview_module
 from . import workflow as workflow_module
 
 
@@ -16,6 +18,8 @@ class UVB_OT_export(Operator):
         settings = context.scene.unreal_vat_bridge
 
         try:
+            importlib.reload(constants_module)
+            importlib.reload(preview_module)
             workflow = importlib.reload(workflow_module)
         except Exception as exc:
             traceback.print_exc()

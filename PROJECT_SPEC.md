@@ -80,6 +80,16 @@ Current field:
 
 - `Export Mode`
 
+UI labels currently shown in the mode dropdown:
+
+- `Vertex`
+- `RBD`
+
+Note:
+
+- the internal enum value for `RBD` mode is now `RBD`
+- Geometry Nodes group naming is now based on `ComputeRBDtoVAT`
+
 ### Source Section
 
 This section is mode-dependent.
@@ -90,11 +100,10 @@ In `VERTEX` mode:
 - if `Use Collection = True`: `Source Collection`
 - otherwise: `Source Object`
 
-In `RIGID` mode:
+In `RBD` mode:
 
-- `Source Type`
-- if `Source Type = SINGLE_OBJECT`: `Source Object`
-- otherwise: `Source Collection`
+- `Source Collection`
+- `Skip Scale`
 
 ### Frame Settings Section
 
@@ -211,7 +220,7 @@ The main entry point is `UVB_OT_export.execute()` in [operators.py](/Users/taiyo
 7. push UI values into the Geometry Nodes modifier inputs
 8. run the Geometry Nodes bake operator
 9. move to the end frame and read export-critical attributes
-10. export Position and Normal textures
+10. export VAT textures
 11. optionally export JSON metadata
 12. optionally export FBX mesh
 
@@ -246,7 +255,7 @@ The temp scene is currently retained for debugging instead of being fully delete
 The Python side expects specific GN group names from [vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend):
 
 - `ComputeVertexVAT`
-- `ComputeRigidVAT`
+- `ComputeRBDtoVAT`
 
 Current important input sockets on `ComputeVertexVAT`:
 
@@ -262,6 +271,20 @@ Current important input sockets on `ComputeVertexVAT`:
 - `RefFrameOBJ`
 - `Collection`
 - `Object`
+
+Current important input sockets on `ComputeRBDtoVAT`:
+
+- `WhatToShow`
+- `ShowExportMesh`
+- `SkipGridTransfer`
+- `SkipScale`
+- `Start Frame`
+- `End Frame`
+- `Reference Frame`
+- `FrameDropStep`
+- `UVName`
+- `RefFrameOBJ`
+- `Collection`
 
 Python side currently resolves socket identifiers by normalized names instead of hardcoding exact identifiers, so small naming variants are tolerated as long as the normalized label remains compatible.
 
@@ -279,14 +302,16 @@ Relevant helpers:
 The workflow reads these Geometry Nodes outputs/attributes during export:
 
 - `TextureSize`
-- `min`
-- `max`
 - `cameraorthoscale` or `cameraortho`
 - `cameralocation` or `cameraposition`
 - `DisplayAttribute`
 - `PosDefrence`
-- `Normal/UVOffset`
 - `UVMap`
+
+Mode-specific range attributes:
+
+- Vertex: `min`, `max`
+- RBD: `Pos_Min`, `Pos_Max`, `Size_Min`, `Size_Max`
 
 The code intentionally toggles `SkipGridTransfer` during different phases:
 
@@ -315,8 +340,15 @@ If direct texel export fails, the code still has a render-based fallback path.
 
 ### Current Export Outputs
 
-- Position texture suffix: `_Position.exr`
-- Normal texture suffix: `_Normal.exr`
+- Vertex mode:
+  Position texture suffix: `_Position.exr`
+- Vertex mode:
+  Normal texture suffix: `_Normal.exr`
+- RBD mode:
+  Position texture suffix: `_Position.exr`
+  Normal texture is not exported as a separate file
+
+RBD mode stores its auxiliary data in the position texture alpha instead of exporting a separate normal texture.
 
 ### Current Image Settings
 
@@ -382,7 +414,7 @@ Optional JSON export includes:
 
 - `Vat_NumFrames`
 - `VatMode`
-  `0` = Vertex, `1` = Rigid
+  `0` = Vertex, `1` = RBD
 - `Vat_UVIndex`
 - `Vat_OriginalFPS`
 - `Vat_FrameStepping`
@@ -391,6 +423,11 @@ Optional JSON export includes:
 - `Vat_TextureSize`
 - `Vat_PositionRangeMin`
 - `Vat_PositionRangeMax`
+
+RBD mode also includes:
+
+- `Vat_SizeRangeMin`
+- `Vat_SizeRangeMax`
 
 `Vat_TextureSize` is exported as a single float scalar, not a `{width, height}` object, because the workflow validates square textures before export.
 
@@ -447,6 +484,18 @@ These are important because they explain why the code looks the way it does now.
 
 The add-on previously failed to appear in Blender because of UTF-8 BOM issues in Python files. This was fixed by stripping BOM.
 
+### Module Reloading
+
+Blender can keep stale Python modules cached across addon reinstalls or reloads.
+
+Current mitigation:
+
+- [__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py) reloads submodules when the addon is reloaded
+- [operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py) reloads `constants`, `preview`, and `workflow` before export
+- mode helpers tolerate legacy `RIGID` values and missing newer constants during transition
+
+This reduces mixed-version errors such as a new `workflow.py` reading an old cached `constants.py`.
+
 ### Blender 5.1 Compositor API
 
 There were API differences around compositor file output nodes in Blender 5.1. Compatibility helpers were added for old and new APIs.
@@ -461,6 +510,10 @@ Texture export relies on `WhatToShow`:
 
 - `Position`
 - `Normal/UVOffset`
+
+Vertex uses both entries.
+
+RBD currently exports only the `Position` pass to disk.
 
 ### Helper-Based FBX Export
 
@@ -511,7 +564,8 @@ When making workflow changes, validate at least these:
 1. `python3 -m compileall unreal_vat_bridge`
 2. install or reload the add-on in Blender 5.1
 3. run a basic texture export
-4. verify Position and Normal textures are generated
-5. if FBX path changed, verify FBX export still succeeds
-6. if UV logic changed, test with missing UVs and non-zero UV index
-7. if GN socket logic changed, confirm the expected sockets still resolve
+4. verify expected textures are generated for the active mode
+5. Vertex should export Position and Normal, while RBD should export Position only
+6. if FBX path changed, verify FBX export still succeeds
+7. if UV logic changed, test with missing UVs and non-zero UV index
+8. if GN socket logic changed, confirm the expected sockets still resolve

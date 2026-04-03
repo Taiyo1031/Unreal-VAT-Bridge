@@ -36,8 +36,15 @@ def get_sampled_frame_count(settings):
     return max(sampled, 1)
 
 
+def _get_export_mode(settings):
+    mode = str(getattr(settings, "export_mode", constants.EXPORT_MODE_VERTEX))
+    export_mode_rbd = getattr(constants, "EXPORT_MODE_RBD", "RBD")
+    if mode in ("RIGID", export_mode_rbd):
+        return export_mode_rbd
+    return mode
+
 def get_element_count(settings):
-    if settings.export_mode == constants.EXPORT_MODE_VERTEX:
+    if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
         use_collection = bool(getattr(settings, "vertex_use_collection", False))
         if use_collection:
             collection = getattr(settings, "vertex_source_collection", None)
@@ -54,10 +61,7 @@ def get_element_count(settings):
             return 0
         return len(obj.data.vertices)
 
-    if settings.rigid_source_type == constants.RIGID_SOURCE_TYPE_SINGLE:
-        return 1 if settings.rigid_source_object else 0
-
-    collection = settings.rigid_source_collection
+    collection = getattr(settings, "rbd_source_collection", getattr(settings, "rigid_source_collection", None))
     if not collection:
         return 0
     return len(collection.objects)

@@ -7,18 +7,11 @@ TEMP_HELPER_PLANE_NAME = "VAT_HelperPlane"
 TEMP_GN_MODIFIER_NAME = "VAT_GeometryNodes"
 
 EXPORT_MODE_VERTEX = "VERTEX"
-EXPORT_MODE_RIGID = "RIGID"
-RIGID_SOURCE_TYPE_SINGLE = "SINGLE_OBJECT"
-RIGID_SOURCE_TYPE_COLLECTION = "COLLECTION"
+EXPORT_MODE_RBD = "RBD"
 
 EXPORT_MODE_ITEMS = (
     (EXPORT_MODE_VERTEX, "Vertex", "Mesh deformation workflows"),
-    (EXPORT_MODE_RIGID, "Rigid", "Object-based motion workflows"),
-)
-
-RIGID_SOURCE_TYPE_ITEMS = (
-    (RIGID_SOURCE_TYPE_SINGLE, "Single Object", "Use one source object"),
-    (RIGID_SOURCE_TYPE_COLLECTION, "Collection", "Use a source collection"),
+    (EXPORT_MODE_RBD, "RBD", "Object-based motion workflows"),
 )
 
 FRAME_DROP_ITEMS = (
@@ -35,7 +28,7 @@ ATTRIBUTE_OUTPUT_ITEMS = (("SEPARATE_FILES", "Separate Files", "Attribute textur
 
 GN_GROUP_BY_MODE = {
     EXPORT_MODE_VERTEX: "ComputeVertexVAT",
-    EXPORT_MODE_RIGID: "ComputeRigidVAT",
+    EXPORT_MODE_RBD: "ComputeRBDtoVAT",
 }
 
 POSITION_SUFFIX = "Position"

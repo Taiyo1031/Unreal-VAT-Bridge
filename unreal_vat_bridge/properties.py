@@ -52,13 +52,12 @@ class UVB_PG_settings(PropertyGroup):
     )
     vertex_source_collection: PointerProperty(name="Source Collection", type=Collection)
 
-    rigid_source_type: EnumProperty(
-        name="Source Type",
-        items=constants.RIGID_SOURCE_TYPE_ITEMS,
-        default=constants.RIGID_SOURCE_TYPE_SINGLE,
+    rbd_source_collection: PointerProperty(name="Source Collection", type=Collection)
+    rbd_skip_scale: BoolProperty(
+        name="Skip Scale",
+        description="Skip scale export when enabled",
+        default=False,
     )
-    rigid_source_object: PointerProperty(name="Source Object", type=Object)
-    rigid_source_collection: PointerProperty(name="Source Collection", type=Collection)
 
     texture_format: EnumProperty(
         name="Texture Format",
