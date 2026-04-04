@@ -12,15 +12,16 @@ def _mesh_object_poll(_self, obj):
 class UVB_PG_settings(PropertyGroup):
     export_mode: EnumProperty(
         name="Export Mode",
+        description="Choose the VAT workflow: Vertex or RBD",
         items=constants.EXPORT_MODE_ITEMS,
         default=constants.EXPORT_MODE_VERTEX,
     )
     output_directory: StringProperty(
-        name="Output Directory",
+        name="Output Folder",
+        description="Folder where exported textures, metadata, and meshes are written",
         subtype="DIR_PATH",
         default="//VAT_Exports",
     )
-    show_output_json: BoolProperty(name="Show Exported Metadata JSON", default=False)
     last_exported_json_text: StringProperty(
         name="Exported Metadata JSON",
         description="Last exported JSON payload",
@@ -28,34 +29,61 @@ class UVB_PG_settings(PropertyGroup):
         options={"TEXTEDIT_UPDATE"},
     )
 
-    start_frame: IntProperty(name="Start Frame", default=1)
-    end_frame: IntProperty(name="End Frame", default=250)
-    reference_frame: IntProperty(name="Reference Frame", default=1)
+    start_frame: IntProperty(
+        name="Start Frame",
+        description="First frame included in the VAT export",
+        default=1,
+    )
+    end_frame: IntProperty(
+        name="End Frame",
+        description="Last frame included in the VAT export",
+        default=250,
+    )
+    reference_frame: IntProperty(
+        name="Reference Frame",
+        description="Frame used as the static reference pose for exported data",
+        default=1,
+    )
     frame_drop_step: IntProperty(
-        name="FPS Dropping",
+        name="Frame Step",
+        description="Sample every Nth frame. A value of 1 exports every frame",
         default=1,
         min=1,
         soft_max=120,
     )
     uv_map_index: IntProperty(
         name="UV Index",
+        description="UV channel index used for VAT lookup. Valid range is 0 to 3",
         default=0,
         min=0,
         max=3,
     )
 
-    vertex_use_collection: BoolProperty(name="Use Collection", default=False)
+    vertex_use_collection: BoolProperty(
+        name="Use Source Collection",
+        description="Use a collection as the Vertex mode source instead of a single object",
+        default=False,
+    )
     vertex_source_object: PointerProperty(
         name="Source Object",
+        description="Mesh object used as the VAT source in Vertex mode",
         type=Object,
         poll=_mesh_object_poll,
     )
-    vertex_source_collection: PointerProperty(name="Source Collection", type=Collection)
+    vertex_source_collection: PointerProperty(
+        name="Source Collection",
+        description="Collection used as the VAT source in Vertex mode when enabled",
+        type=Collection,
+    )
 
-    rbd_source_collection: PointerProperty(name="Source Collection", type=Collection)
+    rbd_source_collection: PointerProperty(
+        name="Source Collection",
+        description="Collection used as the VAT source in RBD mode",
+        type=Collection,
+    )
     rbd_skip_scale: BoolProperty(
         name="Skip Scale",
-        description="Skip scale export when enabled",
+        description="Skip exporting scale data in RBD mode",
         default=False,
     )
 
@@ -80,12 +108,25 @@ class UVB_PG_settings(PropertyGroup):
         default="SEPARATE_FILES",
     )
 
-    export_json_metadata: BoolProperty(name="Export Metadata JSON", default=False)
-    export_mesh_file: BoolProperty(name="Export Mesh File", default=False)
+    export_json_metadata: BoolProperty(
+        name="Export JSON",
+        description="Write metadata JSON next to the exported textures",
+        default=False,
+    )
+    export_mesh_file: BoolProperty(
+        name="Export FBX",
+        description="Export the helper mesh as FBX after Geometry Nodes evaluation",
+        default=False,
+    )
 
-    texture_prefix: StringProperty(name="Texture Prefix", default="T_")
+    texture_prefix: StringProperty(
+        name="Texture Prefix",
+        description="Prefix used when naming exported textures",
+        default="T_",
+    )
     texture_naming_pattern: StringProperty(
         name="Texture Naming Pattern",
+        description="Pattern used to build texture file names",
         default="T_{asset_name}_{attribute}",
     )
     keep_temporary_scene: BoolProperty(

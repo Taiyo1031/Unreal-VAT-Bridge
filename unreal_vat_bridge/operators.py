@@ -140,28 +140,9 @@ class UVB_OT_copy_last_json(Operator):
         return {"FINISHED"}
 
 
-class UVB_OT_toggle_keep_temporary_scene(Operator):
-    bl_idname = "unreal_vat_bridge.toggle_keep_temporary_scene"
-    bl_label = "Toggle Keep Temporary Scene"
-    bl_description = "Toggle whether the temporary export scene is kept for debugging"
-
-    def execute(self, context):
-        settings = getattr(getattr(context, "scene", None), "unreal_vat_bridge", None)
-        if settings is None or not hasattr(settings, "keep_temporary_scene"):
-            self.report({"ERROR"}, "Keep Temporary Scene setting is unavailable. Reload the addon.")
-            return {"CANCELLED"}
-
-        new_value = not bool(getattr(settings, "keep_temporary_scene", True))
-        settings.keep_temporary_scene = new_value
-        state = "enabled" if new_value else "disabled"
-        self.report({"INFO"}, f"Keep Temporary Scene {state}.")
-        return {"FINISHED"}
-
-
 CLASSES = (
     UVB_OT_export,
     UVB_OT_copy_last_json,
-    UVB_OT_toggle_keep_temporary_scene,
 )
 
 

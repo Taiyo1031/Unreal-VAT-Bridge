@@ -58,9 +58,8 @@ The property definitions live in [properties.py](/Users/taiyoparent/Documents/Gi
 Current panels:
 
 - main panel: `UVB_PT_main`
-- top-level panel: `UVB_PT_debug`
 - child panel: `UVB_PT_advanced`
-- child panel: `UVB_PT_custom_attributes`
+- child panel: `UVB_PT_debug`
 
 ### Main Panel Layout
 
@@ -69,12 +68,20 @@ The main panel currently renders these sections in order:
 1. small top version label showing `v12`
 2. `Mode`
 3. `Source`
-4. `Frame Settings`
+4. `Animation`
 5. `Output`
-6. `Image Export Settings`
-7. `Export Options`
-8. `Export Action`
-9. `Future Panels Placeholder`
+6. `Export`
+
+Below the main sections, the panel exposes collapsible child panels:
+
+- `Advanced`
+- `Debug`
+
+The UI is intentionally kept simple:
+
+- the main panel shows only the minimum export controls
+- supporting or diagnostic controls live in collapsed child panels
+- explanations should prefer Blender hover tooltips via property `description`
 
 ### Mode Section
 
@@ -98,8 +105,8 @@ This section is mode-dependent.
 
 In `VERTEX` mode:
 
-- `Use Collection`
-- if `Use Collection = True`: `Source Collection`
+- `Use Source Collection`
+- if `Use Source Collection = True`: `Source Collection`
 - otherwise: `Source Object`
 
 In `RBD` mode:
@@ -107,7 +114,7 @@ In `RBD` mode:
 - `Source Collection`
 - `Skip Scale`
 
-### Frame Settings Section
+### Animation Section
 
 Current fields:
 
@@ -116,78 +123,44 @@ Current fields:
 - `Reference Frame`
 - `UV Index`
 - `Source FPS` as read-only label
-- `FPS Dropping`
+- `Frame Step`
 
 Compatibility note:
 
 - if an older Blender session still holds a stale property group and `uv_map_index` is missing, the UI currently shows `UV Index: 0 (reload addon)` instead of failing
-- if `frame_drop_step` is missing, the UI shows `FPS Dropping: unavailable (reload addon)`
+- if `frame_drop_step` is missing, the UI shows `Frame Step: unavailable (reload addon)`
 - if the `Export Mode` enum is stale, the UI shows a warning asking for addon disable/enable
 
 ### Output Section
 
 Current fields:
 
-- `Output Directory`
-- collapsible `Exported Metadata JSON` viewer
+- `Output Folder`
+- `Export JSON`
+- `Export FBX`
 
-The JSON viewer currently behaves as follows:
-
-- collapsed by default unless `show_output_json = True`
-- if export metadata exists, show the last JSON text and a `Copy Metadata JSON` button
-- otherwise show `No exported metadata JSON available.`
-
-### Image Export Settings Section
-
-This section is currently informational and read-only in the UI.
-
-Displayed fields:
-
-- `Texture Format`
-- `Pixel Type`
-- `Compression`
-- `Attribute Output`
-
-All rows are disabled because the export path is currently fixed by implementation.
-
-### Export Options Section
-
-Current options:
-
-- `Export Metadata JSON`
-- `Export Mesh File`
-
-This section also contains a read-only summary box showing:
-
-- `Texture Format: EXR`
-- `Default Pixel Type: Half Float`
-- `Default Compression: ZIP`
-- `Attribute Textures: Separate Files`
-
-### Export Action Section
+### Export Section
 
 Current action:
 
 - `Export` button bound to `unreal_vat_bridge.export`
+- `Copy JSON` button next to the export button
+- one-line export summary above the button
+
+Current summary text:
+
+- Vertex mode: `Exports Position + Normal, plus optional JSON and FBX.`
+- RBD mode: `Exports Position only, plus optional JSON and FBX.`
+
+Current button behavior:
+
+- `Copy JSON` copies the last exported metadata JSON from memory
+- `Copy JSON` is disabled until a JSON export has been produced in the current session
 
 Current runtime behavior:
 
 - while export is running, the Blender footer/status bar shows stage-based progress with a percentage via `window_manager.progress_*`
 - the footer text is updated with the current phase, such as validation, temp scene creation, bake, texture export, JSON export, or FBX export
-
-### Debug Panel
-
-Current field:
-
-- `Keep Temporary Scene`
-
-Behavior:
-
-- this panel is top-level in the sidebar, not nested under `Advanced`
-- it is registered as a normal top-level panel, not collapsed-by-default
-- the checkbox is presented through an operator-style toggle row so it remains clickable even when direct RNA property UI is stale
-- when enabled, the temp export scene is retained for debugging
-- when disabled, the add-on removes the temp scene at the end and also removes the related orphaned data-blocks created for that export when possible
 
 ### UI Version Label
 
@@ -201,14 +174,40 @@ The `Advanced` child panel currently exposes:
 - `Texture Prefix`
 - `Texture Naming Pattern`
 
-### Custom Attributes Panel
+The fixed EXR format rows are intentionally hidden from the UI for now even though the runtime export format remains fixed by implementation.
 
-The `Custom Attributes` child panel is currently placeholder UI only.
+### Debug Panel
 
-It shows:
+This child panel is collapsed by default.
 
-- `Future extension area for custom attributes.`
-- `Built-in exports currently: Position, Normal.`
+Current field:
+
+- `Keep Temporary Scene`
+
+Behavior:
+
+- this panel is nested under the main add-on panel
+- it uses the normal Blender property checkbox UI
+- when enabled, the temp export scene is retained for debugging
+- when disabled, the add-on removes the temp scene at the end and also removes the related orphaned data-blocks created for that export when possible
+- the panel includes a short one-line explanation of the on/off behavior
+
+### Tooltip Policy
+
+Primary control explanations should live in property hover tooltips, not as persistent UI text.
+
+Important fields that should keep short tooltip text:
+
+- `Export Mode`
+- `Source Object`
+- `Source Collection`
+- `Reference Frame`
+- `Frame Step`
+- `UV Index`
+- `Skip Scale`
+- `Export JSON`
+- `Export FBX`
+- `Keep Temporary Scene`
 
 ### Current UI Property Set
 
@@ -219,13 +218,14 @@ Important settings currently exposed somewhere in the UI:
 - `Start Frame`
 - `End Frame`
 - `Reference Frame`
-- `FPS Dropping`
+- `Frame Step`
 - `UV Index`
-- `Output Directory`
-- `Export Metadata JSON`
-- `Export Mesh File`
+- `Output Folder`
+- `Export JSON`
+- `Export FBX`
 - `Texture Prefix`
 - `Texture Naming Pattern`
+- `Keep Temporary Scene`
 
 ## High-Level Runtime Flow
 
