@@ -11,7 +11,7 @@ import bpy
 from . import constants, preview
 
 UVB_RUNTIME_NODE_GROUP_PREFIX = "UVB_Runtime_"
-UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-03-rbd-export-v16"
+UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-04-rbd-showalph-v22"
 WHAT_TO_SHOW_POSITION = "Position"
 WHAT_TO_SHOW_NORMAL = "Normal/UVOffset"
 WHAT_TO_SHOW_MENU_INDEX = {
@@ -53,7 +53,8 @@ class TempSceneState:
     source_copy_objects: list[bpy.types.Object]
     source_collection_for_gn: bpy.types.Collection | None
     source_object_for_gn: bpy.types.Object | None
-    reference_object: bpy.types.Object
+    reference_object: bpy.types.Object | None
+    reference_collection: bpy.types.Collection | None
     selected_uv_name: str
 
 
@@ -99,7 +100,7 @@ def run_export(context, settings, reporter=None):
             report,
         )
 
-        if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+        if _is_rbd_mode(settings):
             report({"INFO"}, "Exporting RBD position texture...")
         else:
             report({"INFO"}, "Exporting Position/Normal textures...")
@@ -168,8 +169,7 @@ def _validate_and_prepare(context, settings, reporter=None):
         source_collection,
     ) = _resolve_source_selection(context.scene, settings)
 
-    export_mode = _get_export_mode(settings)
-    node_group_name = constants.GN_GROUP_BY_MODE[export_mode]
+    node_group_name = _get_node_group_name_for_mode(settings)
     node_group = _load_fresh_node_group_from_library(node_group_name, report)
 
     source_fps = preview.get_source_fps(context.scene)
@@ -258,14 +258,26 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
         reporter=report,
     )
 
-    report({"INFO"}, "Creating static reference-frame mesh object...")
-    reference_object = _create_reference_frame_object(
-        context,
-        temp_scene,
-        source_copy_objects,
-        int(settings.reference_frame),
-    )
-    _ensure_mesh_object_uv_layer(reference_object, uv_map_index, selected_uv_name)
+    reference_object = None
+    reference_collection = None
+    if _is_rbd_mode(settings):
+        report({"INFO"}, "Creating static reference-frame collection...")
+        reference_collection = _create_reference_frame_collection(
+            context,
+            temp_scene,
+            source_copy_objects,
+            int(settings.reference_frame),
+        )
+        _ensure_uv_layer_on_mesh_objects_in_collection(reference_collection, uv_map_index, selected_uv_name)
+    else:
+        report({"INFO"}, "Creating static reference-frame mesh object...")
+        reference_object = _create_reference_frame_object(
+            context,
+            temp_scene,
+            source_copy_objects,
+            int(settings.reference_frame),
+        )
+        _ensure_mesh_object_uv_layer(reference_object, uv_map_index, selected_uv_name)
 
     helper_mesh = bpy.data.meshes.new(f"{scene_name}_HelperPlaneMesh")
     helper_mesh.from_pydata(
@@ -291,6 +303,7 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
         source_collection_for_gn=source_collection_for_gn,
         source_object_for_gn=source_object_for_gn,
         reference_object=reference_object,
+        reference_collection=reference_collection,
         selected_uv_name=selected_uv_name,
     )
 
@@ -348,6 +361,15 @@ def _prepare_temp_source_uv_layers(source_objects, uv_layer_index, reporter=None
     return canonical_name
 
 
+def _ensure_uv_layer_on_mesh_objects_in_collection(collection, uv_layer_index, preferred_name=None):
+    if collection is None:
+        return
+    for obj in collection.objects:
+        if obj is None or getattr(obj, "type", None) != "MESH" or getattr(obj, "data", None) is None:
+            continue
+        _ensure_mesh_object_uv_layer(obj, uv_layer_index, preferred_name)
+
+
 def _ensure_mesh_object_uv_layer(obj, uv_layer_index, preferred_name=None):
     if obj is None or getattr(obj, "type", None) != "MESH" or getattr(obj, "data", None) is None:
         raise ExportWorkflowError("A mesh object is required when preparing UV layers.")
@@ -398,6 +420,22 @@ def _get_export_mode(settings):
     if mode in ("RIGID", export_mode_rbd):
         return export_mode_rbd
     return mode
+
+
+def _is_rbd_mode(settings):
+    return _get_export_mode(settings) == getattr(constants, "EXPORT_MODE_RBD", "RBD")
+
+
+def _get_node_group_name_for_mode(settings):
+    export_mode = _get_export_mode(settings)
+    mapping = getattr(constants, "GN_GROUP_BY_MODE", {}) or {}
+    if export_mode in mapping:
+        return mapping[export_mode]
+    if export_mode == getattr(constants, "EXPORT_MODE_VERTEX", "VERTEX"):
+        return "ComputeVertexVAT"
+    if export_mode == getattr(constants, "EXPORT_MODE_RBD", "RBD"):
+        return "ComputeRBDtoVAT"
+    raise ExportWorkflowError(f"Unsupported export mode: {export_mode}")
 
 def _get_rbd_source_collection(settings):
     return getattr(
@@ -453,19 +491,27 @@ def _json_texture_size_value(width, height):
 
 
 def _get_position_range_attribute_names(settings):
-    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
-        return ("pos_min", "pos_max")
+    if _is_rbd_mode(settings):
+        return ("Pos_Min", "Pos_Max")
     return ("min", "max")
 
 
 def _get_size_range_attribute_names(settings):
-    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
-        return ("size_min", "size_max")
+    if _is_rbd_mode(settings):
+        return ("Size_Min", "Size_Max")
     return ()
 
 
 def _exports_normal_texture(settings):
-    return _get_export_mode(settings) != constants.EXPORT_MODE_RBD
+    return not _is_rbd_mode(settings)
+
+
+def _attribute_lookup_key(name):
+    return _normalize_socket_name(name)
+
+
+def _uses_show_alph_composite(settings):
+    return _is_rbd_mode(settings)
 
 
 def _create_reference_frame_object(context, temp_scene, source_copy_objects, reference_frame):
@@ -521,6 +567,72 @@ def _create_reference_frame_object(context, temp_scene, source_copy_objects, ref
             context.window.scene = previous_window_scene
 
 
+def _create_reference_frame_collection(context, temp_scene, source_copy_objects, reference_frame):
+    previous_window_scene = context.window.scene if context.window else None
+    reference_collection = None
+
+    try:
+        if context.window:
+            context.window.scene = temp_scene
+
+        temp_scene.frame_set(int(reference_frame))
+        depsgraph = context.evaluated_depsgraph_get()
+
+        collection_name = _unique_name("VAT_RefFrameCollection", bpy.data.collections.keys())
+        reference_collection = bpy.data.collections.new(collection_name)
+        temp_scene.collection.children.link(reference_collection)
+
+        frozen_count = 0
+        for src_obj in source_copy_objects:
+            frozen_obj = _create_static_reference_collection_object(src_obj, depsgraph)
+            if frozen_obj is None:
+                continue
+            reference_collection.objects.link(frozen_obj)
+            frozen_count += 1
+
+        if frozen_count == 0:
+            raise ExportWorkflowError("Failed to generate reference-frame collection from source objects.")
+
+        return reference_collection
+    finally:
+        if context.window and previous_window_scene:
+            context.window.scene = previous_window_scene
+
+
+def _create_static_reference_collection_object(src_obj, depsgraph):
+    if src_obj is None:
+        return None
+
+    object_name = _unique_name(f"VAT_Ref_{src_obj.name}", bpy.data.objects.keys())
+
+    if getattr(src_obj, "type", None) == "MESH":
+        eval_obj = src_obj.evaluated_get(depsgraph)
+        eval_mesh = bpy.data.meshes.new_from_object(
+            eval_obj,
+            preserve_all_data_layers=True,
+            depsgraph=depsgraph,
+        )
+        if eval_mesh is None or len(eval_mesh.vertices) == 0:
+            if eval_mesh is not None:
+                bpy.data.meshes.remove(eval_mesh, do_unlink=True)
+            return None
+        frozen_obj = bpy.data.objects.new(object_name, eval_mesh)
+        frozen_obj.matrix_world = eval_obj.matrix_world.copy()
+    else:
+        frozen_obj = src_obj.copy()
+        if getattr(src_obj, "data", None) is not None and hasattr(src_obj.data, "copy"):
+            frozen_obj.data = src_obj.data.copy()
+        frozen_obj.name = object_name
+        frozen_obj.matrix_world = src_obj.matrix_world.copy()
+
+    frozen_obj.animation_data_clear()
+    for constraint in list(getattr(frozen_obj, "constraints", [])):
+        frozen_obj.constraints.remove(constraint)
+    for modifier in list(getattr(frozen_obj, "modifiers", [])):
+        frozen_obj.modifiers.remove(modifier)
+    return frozen_obj
+
+
 def _join_objects_in_scene(context, scene, objects_to_join):
     view_layer = scene.view_layers[0]
     for obj in scene.objects:
@@ -566,6 +678,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         "object": temp_state.source_object_for_gn.name if temp_state.source_object_for_gn else "",
         "collection": temp_state.source_collection_for_gn.name if temp_state.source_collection_for_gn else "",
         "reference_object": temp_state.reference_object.name if temp_state.reference_object else "",
+        "reference_collection": temp_state.reference_collection.name if temp_state.reference_collection else "",
         "texture_width": prepared.export_texture_width,
         "texture_height": prepared.export_texture_height,
         "frame_drop_step": prepared.frame_drop_step,
@@ -613,14 +726,31 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         ("FrameDropStep", "Frame Drop Step", "FPSDropping", "FPS Dropping"),
         int(prepared.frame_drop_step),
     )
-    set_required(
-        "Ref Frame Object",
-        ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
-        temp_state.reference_object,
-    )
+    if _is_rbd_mode(settings):
+        set_required(
+            "Ref Frame Collection",
+            ("RefFrameCollection", "Ref Frame Collection", "ReferenceCollection", "Reference Collection"),
+            temp_state.reference_collection,
+        )
+        ref_object_identifier = _find_socket_identifier(
+            resolved,
+            ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
+        )
+        if ref_object_identifier:
+            try:
+                gn_modifier[ref_object_identifier] = None
+            except Exception:
+                report({"WARNING"}, "Could not clear Ref Frame Object socket in RBD mode.")
+    else:
+        set_required(
+            "Ref Frame Object",
+            ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
+            temp_state.reference_object,
+        )
     set_required("UV Name", ("UVName", "UV Name"), str(temp_state.selected_uv_name))
-    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+    if _is_rbd_mode(settings):
         _set_skip_scale(prepared.node_group, gn_modifier, _get_rbd_skip_scale(settings), reporter=report)
+        _set_show_alph(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
 
     if prepared.use_collection:
         set_required(
@@ -652,13 +782,14 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
 
     _set_skip_grid_transfer(prepared.node_group, gn_modifier, False, report)
     _set_show_export_mesh(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
-    _set_what_to_show_mode(
-        prepared.node_group,
-        gn_modifier,
-        WHAT_TO_SHOW_POSITION,
-        reporter=report,
-        allow_missing=True,
-    )
+    if not _is_rbd_mode(settings):
+        _set_what_to_show_mode(
+            prepared.node_group,
+            gn_modifier,
+            WHAT_TO_SHOW_POSITION,
+            reporter=report,
+            allow_missing=True,
+        )
 
     if required_missing:
         missing_text = ", ".join(required_missing)
@@ -688,6 +819,14 @@ def _find_skip_scale_identifier(node_group):
     return _find_socket_identifier(
         resolved,
         ("SkipScale", "Skip Scale", "SkipScail", "Skip Scail"),
+    )
+
+
+def _find_show_alph_identifier(node_group):
+    resolved = _resolve_input_socket_identifiers(node_group)
+    return _find_socket_identifier(
+        resolved,
+        ("ShowAlph", "Show Alph", "ShowAlpha", "Show Alpha"),
     )
 
 
@@ -778,6 +917,28 @@ def _set_skip_scale(node_group, gn_modifier, enabled, reporter=None, allow_missi
     except Exception as exc:
         raise ExportWorkflowError(
             f"Failed to assign SkipScale={bool(enabled)} to Geometry Nodes input '{identifier}': {exc}"
+        ) from exc
+
+    return identifier
+
+
+def _set_show_alph(node_group, gn_modifier, enabled, reporter=None, allow_missing=False):
+    report = reporter if reporter else (lambda _level, _message: None)
+    identifier = _find_show_alph_identifier(node_group)
+    if not identifier:
+        if allow_missing:
+            report({"WARNING"}, "ShowAlph input was not found on Geometry Nodes group.")
+            return None
+        raise ExportWorkflowError(
+            "ShowAlph input was not found on Geometry Nodes group. "
+            "Required for RBD alpha export."
+        )
+
+    try:
+        gn_modifier[identifier] = bool(enabled)
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to assign ShowAlph={bool(enabled)} to Geometry Nodes input '{identifier}': {exc}"
         ) from exc
 
     return identifier
@@ -1083,14 +1244,17 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, settings
     eval_frame = int(evaluate_frame)
     min_attr_name, max_attr_name = _get_position_range_attribute_names(settings)
     size_attr_names = _get_size_range_attribute_names(settings)
+    min_attr_key = _attribute_lookup_key(min_attr_name)
+    max_attr_key = _attribute_lookup_key(max_attr_name)
+    size_attr_keys = tuple(_attribute_lookup_key(name) for name in size_attr_names)
 
     attrs = getattr(prepared, "end_frame_attributes", {}) or {}
-    min_value = attrs.get(min_attr_name)
-    max_value = attrs.get(max_attr_name)
+    min_value = attrs.get(min_attr_key)
+    max_value = attrs.get(max_attr_key)
     if min_value is not None and max_value is not None:
         if not size_attr_names:
             return
-        if attrs.get(size_attr_names[0]) is not None and attrs.get(size_attr_names[1]) is not None:
+        if attrs.get(size_attr_keys[0]) is not None and attrs.get(size_attr_keys[1]) is not None:
             return
 
     missing_labels = [min_attr_name, max_attr_name]
@@ -1113,16 +1277,17 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, settings
         temp_state.scene.frame_set(eval_frame)
 
     for attr_name in (min_attr_name, max_attr_name, *size_attr_names):
-        if attr_name in values_false and attrs.get(attr_name) is None:
-            attrs[attr_name] = values_false[attr_name]
+        attr_key = _attribute_lookup_key(attr_name)
+        if attr_key in values_false and attrs.get(attr_key) is None:
+            attrs[attr_key] = values_false[attr_key]
 
     prepared.end_frame_attributes = attrs
 
-    min_value = attrs.get(min_attr_name)
-    max_value = attrs.get(max_attr_name)
+    min_value = attrs.get(min_attr_key)
+    max_value = attrs.get(max_attr_key)
     size_ok = True
     if size_attr_names:
-        size_ok = attrs.get(size_attr_names[0]) is not None and attrs.get(size_attr_names[1]) is not None
+        size_ok = attrs.get(size_attr_keys[0]) is not None and attrs.get(size_attr_keys[1]) is not None
     if min_value is not None and max_value is not None and size_ok:
         report({"INFO"}, f"Collected {', '.join(missing_labels)} from Geometry Nodes End Frame attributes.")
         return
@@ -2047,6 +2212,10 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
 
     what_to_show_identifier = None
     previous_what_to_show = None
+    requires_what_to_show = _exports_normal_texture(settings)
+    show_alph_identifier = None
+    previous_show_alph = None
+    use_show_alph_composite = _uses_show_alph_composite(settings)
 
     try:
         if context.window:
@@ -2055,28 +2224,75 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
         scene.frame_set(eval_frame)
         _apply_scene_exr_image_settings(scene)
 
-        what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
-        if not what_to_show_identifier:
-            raise ExportWorkflowError(
-                "WhatToShow input was not found on Geometry Nodes group. "
-                "Required for Position/Normal attribute export."
+        if requires_what_to_show:
+            what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
+            if not what_to_show_identifier:
+                raise ExportWorkflowError(
+                    "WhatToShow input was not found on Geometry Nodes group. "
+                    "Required for Position/Normal attribute export."
+                )
+            previous_what_to_show = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                what_to_show_identifier,
             )
-        previous_what_to_show = _read_modifier_input_value(
-            temp_state.gn_modifier,
-            prepared.node_group,
-            what_to_show_identifier,
-        )
 
-        _write_display_attribute_texture_from_geometry(
-            context,
-            scene,
-            temp_state,
-            prepared,
-            position_path,
-            eval_frame,
-            WHAT_TO_SHOW_POSITION,
-            reporter=report,
-        )
+        if use_show_alph_composite:
+            show_alph_identifier = _find_show_alph_identifier(prepared.node_group)
+            if not show_alph_identifier:
+                raise ExportWorkflowError(
+                    "ShowAlph input was not found on Geometry Nodes group. "
+                    "Required for RBD alpha export."
+                )
+            previous_show_alph = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                show_alph_identifier,
+            )
+
+            _set_show_alph(prepared.node_group, temp_state.gn_modifier, False, reporter=report)
+            scene.frame_set(eval_frame)
+            color_pixels = _read_display_attribute_pixels_via_realized_instances_probe(
+                context,
+                scene,
+                temp_state.helper_object,
+                int(eval_frame),
+                int(prepared.export_texture_width),
+                int(prepared.export_texture_height),
+                attribute_name="DisplayAttribute",
+            )
+
+            _set_show_alph(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
+            scene.frame_set(eval_frame)
+            alpha_pixels = _read_display_attribute_pixels_via_realized_instances_probe(
+                context,
+                scene,
+                temp_state.helper_object,
+                int(eval_frame),
+                int(prepared.export_texture_width),
+                int(prepared.export_texture_height),
+                attribute_name="DisplayAttribute",
+            )
+
+            combined_pixels = _compose_rgb_and_alpha_pixels(color_pixels, alpha_pixels)
+            _save_float_exr_image(
+                scene,
+                position_path,
+                int(prepared.export_texture_width),
+                int(prepared.export_texture_height),
+                combined_pixels,
+            )
+        else:
+            _write_display_attribute_texture_from_geometry(
+                context,
+                scene,
+                temp_state,
+                prepared,
+                position_path,
+                eval_frame,
+                WHAT_TO_SHOW_POSITION if requires_what_to_show else None,
+                reporter=report,
+            )
         if normal_path:
             _write_display_attribute_texture_from_geometry(
                 context,
@@ -2095,6 +2311,11 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
         return position_path, normal_path
 
     finally:
+        if show_alph_identifier:
+            try:
+                temp_state.gn_modifier[show_alph_identifier] = bool(previous_show_alph)
+            except Exception:
+                pass
         if what_to_show_identifier:
             try:
                 temp_state.gn_modifier[what_to_show_identifier] = int(previous_what_to_show)
@@ -2145,6 +2366,10 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
     override_material = None
     what_to_show_identifier = None
     previous_what_to_show = None
+    requires_what_to_show = _exports_normal_texture(settings)
+    show_alph_identifier = None
+    previous_show_alph = None
+    use_show_alph_composite = _uses_show_alph_composite(settings)
 
     try:
         if context.window:
@@ -2196,31 +2421,89 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
                 f"Need Image/Combined. Available Render Layers outputs: {available_text}"
             )
 
-        what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
-        if not what_to_show_identifier:
-            raise ExportWorkflowError(
-                "WhatToShow input was not found on Geometry Nodes group. "
-                "Required for Position/Normal attribute export."
+        if requires_what_to_show:
+            what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
+            if not what_to_show_identifier:
+                raise ExportWorkflowError(
+                    "WhatToShow input was not found on Geometry Nodes group. "
+                    "Required for Position/Normal attribute export."
+                )
+            previous_what_to_show = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                what_to_show_identifier,
             )
-        previous_what_to_show = _read_modifier_input_value(
-            temp_state.gn_modifier,
-            prepared.node_group,
-            what_to_show_identifier,
-        )
 
-        generated_position = _render_display_attribute_texture(
-            context,
-            scene,
-            view_layer,
-            render_layers,
-            temp_state,
-            prepared,
-            prepared.output_directory,
-            position_prefix,
-            eval_frame,
-            WHAT_TO_SHOW_POSITION,
-            reporter=report,
-        )
+        if use_show_alph_composite:
+            show_alph_identifier = _find_show_alph_identifier(prepared.node_group)
+            if not show_alph_identifier:
+                raise ExportWorkflowError(
+                    "ShowAlph input was not found on Geometry Nodes group. "
+                    "Required for RBD alpha export."
+                )
+            previous_show_alph = _read_modifier_input_value(
+                temp_state.gn_modifier,
+                prepared.node_group,
+                show_alph_identifier,
+            )
+
+            _set_show_alph(prepared.node_group, temp_state.gn_modifier, False, reporter=report)
+            generated_position_rgb = _render_display_attribute_texture(
+                context,
+                scene,
+                view_layer,
+                render_layers,
+                temp_state,
+                prepared,
+                prepared.output_directory,
+                position_prefix,
+                eval_frame,
+                None,
+                reporter=report,
+            )
+
+            alpha_prefix = f"{token}_Alpha_"
+            _set_show_alph(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
+            generated_position_alpha = _render_display_attribute_texture(
+                context,
+                scene,
+                view_layer,
+                render_layers,
+                temp_state,
+                prepared,
+                prepared.output_directory,
+                alpha_prefix,
+                eval_frame,
+                None,
+                reporter=report,
+            )
+            _compose_rendered_exr_alpha(
+                scene,
+                position_path,
+                generated_position_rgb,
+                generated_position_alpha,
+            )
+            generated_position = position_path
+            for temp_path in (generated_position_rgb, generated_position_alpha):
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+        else:
+            generated_position = _render_display_attribute_texture(
+                context,
+                scene,
+                view_layer,
+                render_layers,
+                temp_state,
+                prepared,
+                prepared.output_directory,
+                position_prefix,
+                eval_frame,
+                WHAT_TO_SHOW_POSITION if requires_what_to_show else None,
+                reporter=report,
+            )
         generated_normal = None
         if normal_path:
             generated_normal = _render_display_attribute_texture(
@@ -2242,7 +2525,8 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
         if normal_path and os.path.exists(normal_path):
             os.remove(normal_path)
 
-        os.replace(generated_position, position_path)
+        if generated_position != position_path:
+            os.replace(generated_position, position_path)
         if normal_path and generated_normal:
             os.replace(generated_normal, normal_path)
 
@@ -2254,6 +2538,11 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
     except RuntimeError as exc:
         raise ExportWorkflowError(f"Rendered EXR export failed: {exc}") from exc
     finally:
+        if show_alph_identifier:
+            try:
+                temp_state.gn_modifier[show_alph_identifier] = bool(previous_show_alph)
+            except Exception:
+                pass
         if node_tree is not None:
             for node in created_nodes:
                 try:
@@ -2328,9 +2617,12 @@ def _write_display_attribute_texture_from_geometry(
     reporter=None,
 ):
     report = reporter if reporter else (lambda _level, _message: None)
-    report({"INFO"}, f"Writing texels directly from Geometry Nodes for WhatToShow='{what_to_show_mode}'..." )
+    if what_to_show_mode:
+        report({"INFO"}, f"Writing texels directly from Geometry Nodes for WhatToShow='{what_to_show_mode}'..." )
+        _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
+    else:
+        report({"INFO"}, "Writing texels directly from Geometry Nodes DisplayAttribute..." )
 
-    _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
     scene.frame_set(int(evaluate_frame))
 
     pixels = _read_display_attribute_pixels_via_realized_instances_probe(
@@ -2522,6 +2814,49 @@ def _attribute_sample_to_rgba(sample):
     return (0.0, 0.0, 0.0, 1.0)
 
 
+def _compose_rgb_and_alpha_pixels(color_pixels, alpha_pixels):
+    if len(color_pixels) != len(alpha_pixels):
+        raise ExportWorkflowError("RGB pass and alpha pass pixel buffers must be the same length.")
+    if len(color_pixels) % 4 != 0:
+        raise ExportWorkflowError("Pixel buffers must contain RGBA tuples.")
+
+    combined = list(color_pixels)
+    for base in range(0, len(combined), 4):
+        alpha_value = max(
+            float(alpha_pixels[base + 0]),
+            float(alpha_pixels[base + 1]),
+            float(alpha_pixels[base + 2]),
+        )
+        combined[base + 3] = alpha_value
+    return combined
+
+
+def _load_image_pixels_from_file(filepath):
+    image = bpy.data.images.load(filepath, check_existing=False)
+    try:
+        pixels = [0.0] * len(image.pixels)
+        image.pixels.foreach_get(pixels)
+        return int(image.size[0]), int(image.size[1]), pixels
+    finally:
+        try:
+            bpy.data.images.remove(image, do_unlink=True)
+        except Exception:
+            pass
+
+
+def _compose_rendered_exr_alpha(scene, output_path, color_path, alpha_path):
+    color_width, color_height, color_pixels = _load_image_pixels_from_file(color_path)
+    alpha_width, alpha_height, alpha_pixels = _load_image_pixels_from_file(alpha_path)
+    if color_width != alpha_width or color_height != alpha_height:
+        raise ExportWorkflowError(
+            f"RGB pass and alpha pass dimensions do not match: "
+            f"{color_width}x{color_height} vs {alpha_width}x{alpha_height}."
+        )
+
+    combined_pixels = _compose_rgb_and_alpha_pixels(color_pixels, alpha_pixels)
+    _save_float_exr_image(scene, output_path, color_width, color_height, combined_pixels)
+
+
 def _save_float_exr_image(scene, output_path, width, height, pixels):
     image = bpy.data.images.new(
         _unique_name("UVB_ExportImage", bpy.data.images.keys()),
@@ -2572,9 +2907,11 @@ def _render_display_attribute_texture(
     reporter=None,
 ):
     report = reporter if reporter else (lambda _level, _message: None)
-    report({"INFO"}, f"Rendering DisplayAttribute for WhatToShow='{what_to_show_mode}'...")
-
-    _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
+    if what_to_show_mode:
+        report({"INFO"}, f"Rendering DisplayAttribute for WhatToShow='{what_to_show_mode}'...")
+        _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
+    else:
+        report({"INFO"}, "Rendering DisplayAttribute...")
     scene.frame_set(int(evaluate_frame))
 
     node_tree = render_layers.id_data
@@ -2907,6 +3244,8 @@ def _create_attribute_override_material(attribute_name, attribute_type="INSTANCE
 
     output = nodes.new("ShaderNodeOutputMaterial")
     emission = nodes.new("ShaderNodeEmission")
+    transparent = nodes.new("ShaderNodeBsdfTransparent")
+    mix_shader = nodes.new("ShaderNodeMixShader")
     attribute = nodes.new("ShaderNodeAttribute")
 
     attribute.attribute_name = attribute_name
@@ -2917,8 +3256,31 @@ def _create_attribute_override_material(attribute_name, attribute_type="INSTANCE
             pass
 
     emission.inputs["Strength"].default_value = 1.0
-    links.new(attribute.outputs["Vector"], emission.inputs["Color"])
-    links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+    color_output = None
+    for socket_name in ("Vector", "Color"):
+        socket = attribute.outputs.get(socket_name)
+        if socket is not None:
+            color_output = socket
+            break
+    if color_output is None:
+        raise ExportWorkflowError("Attribute node did not expose a usable color/vector output.")
+
+    alpha_output = None
+    for socket_name in ("Alpha", "Fac"):
+        socket = attribute.outputs.get(socket_name)
+        if socket is not None:
+            alpha_output = socket
+            break
+
+    links.new(color_output, emission.inputs["Color"])
+    links.new(transparent.outputs["BSDF"], mix_shader.inputs[1])
+    links.new(emission.outputs["Emission"], mix_shader.inputs[2])
+    if alpha_output is not None:
+        links.new(alpha_output, mix_shader.inputs[0])
+    else:
+        mix_shader.inputs[0].default_value = 1.0
+    links.new(mix_shader.outputs["Shader"], output.inputs["Surface"])
     return material
 
 
@@ -3045,8 +3407,8 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
     end_frame_attrs = getattr(prepared, "end_frame_attributes", {}) or {}
     pos_min_attr_name, pos_max_attr_name = _get_position_range_attribute_names(settings)
     size_attr_names = _get_size_range_attribute_names(settings)
-    min_value = end_frame_attrs.get(pos_min_attr_name)
-    max_value = end_frame_attrs.get(pos_max_attr_name)
+    min_value = end_frame_attrs.get(_attribute_lookup_key(pos_min_attr_name))
+    max_value = end_frame_attrs.get(_attribute_lookup_key(pos_max_attr_name))
 
     if min_value is None or max_value is None:
         raise ExportWorkflowError(
@@ -3073,9 +3435,10 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         "Vat_PositionRangeMax": _json_vector3(max_value),
     }
 
-    if _get_export_mode(settings) == constants.EXPORT_MODE_RBD and size_attr_names:
-        size_min_value = end_frame_attrs.get(size_attr_names[0])
-        size_max_value = end_frame_attrs.get(size_attr_names[1])
+    if _is_rbd_mode(settings) and size_attr_names:
+        payload["Vat_SkipScale"] = bool(_get_rbd_skip_scale(settings))
+        size_min_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[0]))
+        size_max_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[1]))
         if size_min_value is None or size_max_value is None:
             raise ExportWorkflowError(
                 f"Geometry Nodes attributes '{size_attr_names[0]}' and '{size_attr_names[1]}' are required for RBD JSON export."
@@ -3163,40 +3526,50 @@ def _export_mesh_fbx(context, prepared, temp_state, settings, reporter=None):
         _set_uv_name_input(prepared.node_group, temp_state.gn_modifier, temp_state.selected_uv_name, reporter=report)
         _set_show_export_mesh(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
         scene.frame_set(eval_frame)
+        if _is_rbd_mode(settings):
+            report({"INFO"}, "Creating FBX export mesh from VAT_HelperPlane with ShowExportMesh enabled...")
+            export_object = _create_evaluated_export_mesh_snapshot(
+                context,
+                scene,
+                temp_state.helper_object,
+            )
+            export_object.animation_data_clear()
+            renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
+            export_object.name = prepared.asset_name
+        else:
+            export_object = temp_state.helper_object.copy()
+            if temp_state.helper_object.data is not None:
+                export_object.data = temp_state.helper_object.data.copy()
+            export_object.animation_data_clear()
+            scene.collection.objects.link(export_object)
 
-        export_object = temp_state.helper_object.copy()
-        if temp_state.helper_object.data is not None:
-            export_object.data = temp_state.helper_object.data.copy()
-        export_object.animation_data_clear()
-        scene.collection.objects.link(export_object)
+            renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
+            export_object.name = prepared.asset_name
 
-        renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
-        export_object.name = prepared.asset_name
+            export_modifier = _find_nodes_modifier(export_object, constants.TEMP_GN_MODIFIER_NAME)
+            if export_modifier is None:
+                raise ExportWorkflowError("Geometry Nodes modifier was not found on VAT_HelperPlane for FBX export.")
 
-        export_modifier = _find_nodes_modifier(export_object, constants.TEMP_GN_MODIFIER_NAME)
-        if export_modifier is None:
-            raise ExportWorkflowError("Geometry Nodes modifier was not found on VAT_HelperPlane for FBX export.")
+            _set_skip_grid_transfer(prepared.node_group, export_modifier, False, report)
+            _set_uv_name_input(prepared.node_group, export_modifier, temp_state.selected_uv_name, reporter=report)
+            _set_show_export_mesh(prepared.node_group, export_modifier, True, reporter=report)
+            scene.frame_set(eval_frame)
 
-        _set_skip_grid_transfer(prepared.node_group, export_modifier, False, report)
-        _set_uv_name_input(prepared.node_group, export_modifier, temp_state.selected_uv_name, reporter=report)
-        _set_show_export_mesh(prepared.node_group, export_modifier, True, reporter=report)
-        scene.frame_set(eval_frame)
-
-        for modifier in list(export_object.modifiers):
-            _select_only_object_in_scene(context, scene, view_layer, export_object)
-            with context.temp_override(
-                scene=scene,
-                view_layer=view_layer,
-                active_object=export_object,
-                object=export_object,
-                selected_objects=[export_object],
-                selected_editable_objects=[export_object],
-            ):
-                result = bpy.ops.object.modifier_apply(modifier=modifier.name)
-            if "FINISHED" not in result:
-                raise ExportWorkflowError(
-                    f"Failed to apply modifier '{modifier.name}' on VAT_HelperPlane for FBX export."
-                )
+            for modifier in list(export_object.modifiers):
+                _select_only_object_in_scene(context, scene, view_layer, export_object)
+                with context.temp_override(
+                    scene=scene,
+                    view_layer=view_layer,
+                    active_object=export_object,
+                    object=export_object,
+                    selected_objects=[export_object],
+                    selected_editable_objects=[export_object],
+                ):
+                    result = bpy.ops.object.modifier_apply(modifier=modifier.name)
+                if "FINISHED" not in result:
+                    raise ExportWorkflowError(
+                        f"Failed to apply modifier '{modifier.name}' on VAT_HelperPlane for FBX export."
+                    )
 
         _ensure_export_mesh_uv_layer(export_object, temp_state.selected_uv_name, _get_uv_map_index(settings))
 
@@ -3265,6 +3638,81 @@ def _export_mesh_fbx(context, prepared, temp_state, settings, reporter=None):
             context.window.scene = previous_window_scene
 
     return mesh_path
+
+
+def _create_evaluated_export_mesh_snapshot(context, scene, source_object):
+    previous_window_scene = context.window.scene if context.window else None
+    probe_object = None
+    probe_group = None
+
+    try:
+        if context.window:
+            context.window.scene = scene
+
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = source_object.evaluated_get(depsgraph)
+        eval_mesh = bpy.data.meshes.new_from_object(
+            eval_obj,
+            preserve_all_data_layers=True,
+            depsgraph=depsgraph,
+        )
+        if eval_mesh is None or len(eval_mesh.vertices) == 0:
+            if eval_mesh is not None:
+                bpy.data.meshes.remove(eval_mesh, do_unlink=True)
+            eval_mesh = None
+
+            probe_object = source_object.copy()
+            if source_object.data is not None:
+                probe_object.data = source_object.data.copy()
+            probe_object.name = _unique_name("VAT_ExportProbe", bpy.data.objects.keys())
+            scene.collection.objects.link(probe_object)
+
+            probe_group = _create_realize_instances_probe_group()
+            probe_modifier = probe_object.modifiers.new("UVB_ExportRealizeProbe", "NODES")
+            probe_modifier.node_group = probe_group
+
+            depsgraph = context.evaluated_depsgraph_get()
+            eval_probe_obj = probe_object.evaluated_get(depsgraph)
+            eval_mesh = bpy.data.meshes.new_from_object(
+                eval_probe_obj,
+                preserve_all_data_layers=True,
+                depsgraph=depsgraph,
+            )
+            if eval_mesh is None or len(eval_mesh.vertices) == 0:
+                if eval_mesh is not None:
+                    bpy.data.meshes.remove(eval_mesh, do_unlink=True)
+                raise ExportWorkflowError(
+                    "Evaluated geometry from VAT_HelperPlane did not contain a mesh even with ShowExportMesh enabled."
+                )
+
+        export_object = bpy.data.objects.new(
+            _unique_name("VAT_ExportMesh", bpy.data.objects.keys()),
+            eval_mesh,
+        )
+        export_object.matrix_world = eval_obj.matrix_world.copy()
+        scene.collection.objects.link(export_object)
+        return export_object
+    finally:
+        if probe_object is not None:
+            probe_mesh_data = probe_object.data
+            try:
+                bpy.data.objects.remove(probe_object, do_unlink=True)
+            except Exception:
+                pass
+            if probe_mesh_data is not None and getattr(probe_mesh_data, "users", 0) == 0:
+                try:
+                    bpy.data.meshes.remove(probe_mesh_data, do_unlink=True)
+                except Exception:
+                    pass
+
+        if probe_group is not None and getattr(probe_group, "users", 0) == 0:
+            try:
+                bpy.data.node_groups.remove(probe_group, do_unlink=True)
+            except Exception:
+                pass
+
+        if context.window and previous_window_scene:
+            context.window.scene = previous_window_scene
 
 
 def _find_nodes_modifier(obj, preferred_name=None):

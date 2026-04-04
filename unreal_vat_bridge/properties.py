@@ -95,12 +95,25 @@ CLASSES = (UVB_PG_settings,)
 
 
 def register():
+    if hasattr(bpy.types.Scene, "unreal_vat_bridge"):
+        try:
+            del bpy.types.Scene.unreal_vat_bridge
+        except Exception:
+            pass
     for cls in CLASSES:
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
         bpy.utils.register_class(cls)
     bpy.types.Scene.unreal_vat_bridge = PointerProperty(type=UVB_PG_settings)
 
 
 def unregister():
-    del bpy.types.Scene.unreal_vat_bridge
+    if hasattr(bpy.types.Scene, "unreal_vat_bridge"):
+        del bpy.types.Scene.unreal_vat_bridge
     for cls in reversed(CLASSES):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass

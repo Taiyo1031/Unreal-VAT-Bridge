@@ -15,6 +15,17 @@ def _get_rbd_skip_scale(settings):
     return bool(getattr(settings, "rbd_skip_scale", getattr(settings, "skip_scale", False)))
 
 
+def _is_export_mode_enum_stale(settings):
+    try:
+        prop = settings.bl_rna.properties.get("export_mode")
+        if prop is None:
+            return False
+        identifiers = {item.identifier for item in prop.enum_items}
+        return "RBD" not in identifiers
+    except Exception:
+        return False
+
+
 class UVB_PT_main(Panel):
     bl_idname = "UVB_PT_main"
     bl_label = constants.ADDON_NAME
@@ -26,9 +37,15 @@ class UVB_PT_main(Panel):
         layout = self.layout
         settings = context.scene.unreal_vat_bridge
 
+        version_row = layout.row()
+        version_row.scale_y = 0.65
+        version_row.label(text="v12")
+
         mode_box = layout.box()
         mode_box.label(text="Mode")
         mode_box.prop(settings, "export_mode", text="Export Mode")
+        if _is_export_mode_enum_stale(settings):
+            mode_box.label(text="Export Mode enum is stale. Disable/enable addon.", icon="ERROR")
 
         source_box = layout.box()
         source_box.label(text="Source")

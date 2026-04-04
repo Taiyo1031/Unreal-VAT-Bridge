@@ -73,6 +73,7 @@ The main panel currently renders these sections in order:
 6. `Export Options`
 7. `Export Action`
 8. `Future Panels Placeholder`
+9. small top version label showing `v12`
 
 ### Mode Section
 
@@ -120,6 +121,7 @@ Compatibility note:
 
 - if an older Blender session still holds a stale property group and `uv_map_index` is missing, the UI currently shows `UV Index: 0 (reload addon)` instead of failing
 - if `frame_drop_step` is missing, the UI shows `FPS Dropping: unavailable (reload addon)`
+- if the `Export Mode` enum is stale, the UI shows a warning asking for addon disable/enable
 
 ### Output Section
 
@@ -247,6 +249,7 @@ Important temporary objects:
 - helper plane: `VAT_HelperPlane`
 - Geometry Nodes modifier: `VAT_GeometryNodes`
 - reference object name pattern: `VAT_RefFrameOBJ`
+- RBD reference collection name pattern: `VAT_RefFrameCollection`
 
 The temp scene is currently retained for debugging instead of being fully deleted at the end.
 
@@ -274,8 +277,8 @@ Current important input sockets on `ComputeVertexVAT`:
 
 Current important input sockets on `ComputeRBDtoVAT`:
 
-- `WhatToShow`
 - `ShowExportMesh`
+- `ShowAlph`
 - `SkipGridTransfer`
 - `SkipScale`
 - `Start Frame`
@@ -283,7 +286,7 @@ Current important input sockets on `ComputeRBDtoVAT`:
 - `Reference Frame`
 - `FrameDropStep`
 - `UVName`
-- `RefFrameOBJ`
+- `RefFrameCollection`
 - `Collection`
 
 Python side currently resolves socket identifiers by normalized names instead of hardcoding exact identifiers, so small naming variants are tolerated as long as the normalized label remains compatible.
@@ -337,6 +340,8 @@ The current preferred path is:
 This direct texel path was introduced to avoid black edge artifacts caused by render/compositor sampling.
 
 If direct texel export fails, the code still has a render-based fallback path.
+The render fallback uses `DisplayAttribute` RGB for emission and `DisplayAttribute` alpha for material transparency so the EXR alpha channel is preserved.
+For RBD, `ShowAlph` is toggled `OFF` and `ON` to create two passes, and the second pass is merged into the final EXR alpha channel.
 
 ### Current Export Outputs
 
@@ -397,10 +402,15 @@ Current implementation:
    - `ShowExportMesh = True`
    - `SkipGridTransfer = False`
    - `UVName = selected UV name`
-3. duplicate `VAT_HelperPlane`
-4. apply all modifiers on the duplicated helper object
-5. ensure the resulting mesh contains the requested export UV layer
-6. export that duplicated helper-derived mesh as FBX
+3. Vertex mode:
+   duplicate `VAT_HelperPlane`
+4. Vertex mode:
+   apply all modifiers on the duplicated helper object
+5. RBD mode:
+   snapshot the evaluated mesh from `VAT_HelperPlane` while `ShowExportMesh = True`
+   if the helper still evaluates to instances, add a temporary `Realize Instances` probe before snapshotting
+6. ensure the resulting mesh contains the requested export UV layer
+7. export that helper-derived mesh as FBX
 
 This means the FBX should represent the final Geometry Nodes export mesh, not the original source mesh and not `VAT_RefFrameOBJ`.
 
@@ -426,6 +436,7 @@ Optional JSON export includes:
 
 RBD mode also includes:
 
+- `Vat_SkipScale`
 - `Vat_SizeRangeMin`
 - `Vat_SizeRangeMax`
 
@@ -492,6 +503,7 @@ Current mitigation:
 
 - [__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py) reloads submodules when the addon is reloaded
 - [operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py) reloads `constants`, `preview`, and `workflow` before export
+- [properties.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/properties.py) defensively re-registers the scene property group on addon enable
 - mode helpers tolerate legacy `RIGID` values and missing newer constants during transition
 
 This reduces mixed-version errors such as a new `workflow.py` reading an old cached `constants.py`.
@@ -513,7 +525,7 @@ Texture export relies on `WhatToShow`:
 
 Vertex uses both entries.
 
-RBD currently exports only the `Position` pass to disk.
+RBD currently exports only the `Position` pass to disk and may not expose `WhatToShow` at all.
 
 ### Helper-Based FBX Export
 
@@ -532,6 +544,20 @@ These areas are easy to break:
 - helper-based FBX export after enabling `ShowExportMesh`
 
 When changing any of these, test inside Blender instead of relying only on static reasoning.
+
+### RBD Reference Data
+
+RBD no longer sends a single joined reference mesh object into Geometry Nodes.
+
+Current RBD behavior:
+
+- duplicate the selected source collection into the temporary scene
+- create a second reference collection at the chosen reference frame
+- freeze each object in that reference collection at the reference frame
+- clear animation/keyframes from the frozen reference objects
+- pass that collection into the GN socket `RefFrameCollection`
+
+Vertex mode still uses the single joined `VAT_RefFrameOBJ` path.
 
 ## Known Non-Source Files
 
