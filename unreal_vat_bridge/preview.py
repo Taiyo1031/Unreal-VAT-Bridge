@@ -6,12 +6,8 @@ from . import constants
 
 @dataclass
 class ExportPreview:
-    element_count: int
-    sampled_frame_count: int
     texture_width: int
     texture_height: int
-    estimated_aspect_ratio: str
-    estimated_file_size_mb: float
 
 
 def get_source_fps(scene):
@@ -74,26 +70,13 @@ def estimate_texture_dimensions(pixel_count):
     return width, height
 
 
-def build_preview(context, settings):
+def build_preview(settings):
     sampled_frame_count = get_sampled_frame_count(settings)
     element_count = get_element_count(settings)
     total_pixels = max(1, element_count * sampled_frame_count)
     texture_width, texture_height = estimate_texture_dimensions(total_pixels)
 
-    ratio = float(texture_width) / float(texture_height)
-    estimated_aspect_ratio = f"{ratio:.3f}:1"
-
-    # Position and Normal textures, RGBA, half float (2 bytes per channel).
-    bytes_per_texel = 4 * 2
-    texture_count = 2
-    estimated_bytes = texture_width * texture_height * bytes_per_texel * texture_count
-    estimated_file_size_mb = estimated_bytes / (1024.0 * 1024.0)
-
     return ExportPreview(
-        element_count=element_count,
-        sampled_frame_count=sampled_frame_count,
         texture_width=texture_width,
         texture_height=texture_height,
-        estimated_aspect_ratio=estimated_aspect_ratio,
-        estimated_file_size_mb=estimated_file_size_mb,
     )

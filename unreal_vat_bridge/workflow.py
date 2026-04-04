@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -11,7 +12,7 @@ import bpy
 from . import constants, preview
 
 UVB_RUNTIME_NODE_GROUP_PREFIX = "UVB_Runtime_"
-UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-04-rbd-showalph-v22"
+UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-04-rbd-showalph-v30"
 WHAT_TO_SHOW_POSITION = "Position"
 WHAT_TO_SHOW_NORMAL = "Normal/UVOffset"
 WHAT_TO_SHOW_MENU_INDEX = {
@@ -26,7 +27,6 @@ class ExportWorkflowError(RuntimeError):
 @dataclass
 class PreparedExport:
     output_directory: str
-    source_scene: bpy.types.Scene
     source_objects: list[bpy.types.Object]
     source_kind: str
     asset_name: str
@@ -37,7 +37,6 @@ class PreparedExport:
     frame_drop_step: int
     node_group_name: str
     node_group: bpy.types.NodeTree
-    preview_estimate: preview.ExportPreview
     export_texture_width: int
     export_texture_height: int
 
@@ -66,30 +65,47 @@ class ExportResult:
     mesh_path: str | None
 
 
-def run_export(context, settings, reporter=None):
+def _report_progress(progress_callback, percent, message):
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(float(percent), str(message))
+    except Exception:
+        pass
+
+
+def run_export(context, settings, reporter=None, progress_callback=None):
     report = reporter if reporter else (lambda _level, _message: None)
     temp_state = None
+    completed_successfully = False
 
     if hasattr(settings, "last_exported_json_text"):
         settings.last_exported_json_text = ""
 
     try:
+        _report_progress(progress_callback, 1, "Starting export")
         report({"INFO"}, f"Workflow build: {UVB_WORKFLOW_BUILD_ID} ({__file__})")
+        _report_progress(progress_callback, 4, "Clearing runtime cache")
         report({"INFO"}, "Clearing previous runtime node-group cache...")
         _purge_runtime_node_groups(report)
 
+        _report_progress(progress_callback, 10, "Validating export settings")
         report({"INFO"}, "Validating export settings...")
         prepared = _validate_and_prepare(context, settings, report)
 
+        _report_progress(progress_callback, 22, "Creating temporary compute scene")
         report({"INFO"}, "Creating temporary compute scene...")
         temp_state = _create_temporary_scene(context, prepared, settings, report)
 
+        _report_progress(progress_callback, 34, "Applying Geometry Nodes inputs")
         report({"INFO"}, "Applying UI values to Geometry Nodes transfer layer...")
         _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report)
 
+        _report_progress(progress_callback, 42, "Baking Geometry Nodes animation")
         report({"INFO"}, "Running Geometry Nodes animation bake...")
         _bake_geometry_nodes_animation_node(context, temp_state, settings, report)
 
+        _report_progress(progress_callback, 62, "Collecting end-frame export data")
         report({"INFO"}, "Moving playhead to End Frame and collecting end-frame export settings...")
         _apply_end_frame_export_settings(
             context,
@@ -100,6 +116,7 @@ def run_export(context, settings, reporter=None):
             report,
         )
 
+        _report_progress(progress_callback, 76, "Exporting textures")
         if _is_rbd_mode(settings):
             report({"INFO"}, "Exporting RBD position texture...")
         else:
@@ -108,6 +125,7 @@ def run_export(context, settings, reporter=None):
 
         json_path = None
         if settings.export_json_metadata:
+            _report_progress(progress_callback, 88, "Exporting JSON metadata")
             report({"INFO"}, "Exporting JSON metadata...")
             json_path, json_text = _export_json_metadata(
                 context,
@@ -122,6 +140,7 @@ def run_export(context, settings, reporter=None):
 
         mesh_path = None
         if settings.export_mesh_file:
+            _report_progress(progress_callback, 94, "Exporting FBX mesh")
             report({"INFO"}, "Exporting FBX mesh...")
             mesh_path = _export_mesh_fbx(context, prepared, temp_state, settings, reporter=report)
 
@@ -131,6 +150,7 @@ def run_export(context, settings, reporter=None):
             json_path=json_path,
             mesh_path=mesh_path,
         )
+        completed_successfully = True
         report({"INFO"}, "Export workflow completed.")
         return result
     except ExportWorkflowError:
@@ -139,7 +159,21 @@ def run_export(context, settings, reporter=None):
         raise ExportWorkflowError(f"Export failed: {exc}") from exc
     finally:
         if temp_state:
-            report({"INFO"}, "Temporary compute scene retained for debugging.")
+            if bool(getattr(settings, "keep_temporary_scene", True)):
+                if completed_successfully:
+                    _report_progress(progress_callback, 100, "Export completed")
+                report({"INFO"}, "Temporary compute scene retained for debugging.")
+            else:
+                _report_progress(progress_callback, 99, "Cleaning temporary scene")
+                try:
+                    cleanup_summary = _cleanup_temporary_scene(temp_state)
+                    report({"INFO"}, cleanup_summary)
+                    if completed_successfully:
+                        _report_progress(progress_callback, 100, "Export completed")
+                except Exception as cleanup_exc:
+                    report({"WARNING"}, f"Failed to fully clean temporary compute scene: {cleanup_exc}")
+        elif completed_successfully:
+            _report_progress(progress_callback, 100, "Export completed")
 
 
 def _validate_and_prepare(context, settings, reporter=None):
@@ -174,11 +208,10 @@ def _validate_and_prepare(context, settings, reporter=None):
 
     source_fps = preview.get_source_fps(context.scene)
     frame_drop_step = preview.get_frame_drop_step(settings)
-    preview_estimate = preview.build_preview(context, settings)
+    preview_estimate = preview.build_preview(settings)
 
     return PreparedExport(
         output_directory=output_directory,
-        source_scene=context.scene,
         source_objects=source_objects,
         source_kind=source_kind,
         asset_name=asset_name,
@@ -189,7 +222,6 @@ def _validate_and_prepare(context, settings, reporter=None):
         frame_drop_step=frame_drop_step,
         node_group_name=node_group_name,
         node_group=node_group,
-        preview_estimate=preview_estimate,
         export_texture_width=int(preview_estimate.texture_width),
         export_texture_height=int(preview_estimate.texture_height),
     )
@@ -1614,23 +1646,6 @@ def _coerce_float_numeric_value(value):
 
     return None
 
-def _read_required_gn_min_max_attributes(context, scene, helper_object, evaluate_frame):
-    values = _read_named_attributes_from_evaluated_geometry(
-        context,
-        scene,
-        helper_object,
-        int(evaluate_frame),
-        ("min", "max"),
-    )
-
-    if "min" not in values or "max" not in values:
-        raise ExportWorkflowError(
-            "Geometry Nodes attributes 'min' and 'max' are required on the evaluated helper mesh."
-        )
-
-    return values["min"], values["max"]
-
-
 def _read_named_attributes_from_evaluated_geometry(context, scene, helper_object, evaluate_frame, required_names):
     previous_window_scene = context.window.scene if context.window else None
     previous_frame = scene.frame_current
@@ -1876,27 +1891,6 @@ def _create_realize_instances_probe_group():
 def _is_power_of_two(value):
     ivalue = int(value)
     return ivalue > 0 and (ivalue & (ivalue - 1)) == 0
-
-
-def _extract_texture_size_components(sample):
-    if hasattr(sample, "vector"):
-        vec = sample.vector
-        if len(vec) >= 2:
-            return vec[0], vec[1]
-
-    if hasattr(sample, "color"):
-        col = sample.color
-        if len(col) >= 2:
-            return col[0], col[1]
-
-    if hasattr(sample, "value"):
-        value = sample.value
-        return value, value
-
-    if hasattr(sample, "x") and hasattr(sample, "y"):
-        return sample.x, sample.y
-
-    return None, None
 
 
 def _extract_attribute_sample_value(sample):
@@ -2260,6 +2254,9 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
                 int(prepared.export_texture_width),
                 int(prepared.export_texture_height),
                 attribute_name="DisplayAttribute",
+                uv_layer_name=temp_state.selected_uv_name,
+                allow_partial=_is_rbd_mode(settings),
+                reporter=report,
             )
 
             _set_show_alph(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
@@ -2272,6 +2269,9 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
                 int(prepared.export_texture_width),
                 int(prepared.export_texture_height),
                 attribute_name="DisplayAttribute",
+                uv_layer_name=temp_state.selected_uv_name,
+                allow_partial=_is_rbd_mode(settings),
+                reporter=report,
             )
 
             combined_pixels = _compose_rgb_and_alpha_pixels(color_pixels, alpha_pixels)
@@ -2371,6 +2371,21 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
     previous_show_alph = None
     use_show_alph_composite = _uses_show_alph_composite(settings)
 
+    def ensure_render_layers_node():
+        nonlocal node_tree, created_compositor_tree
+        node_tree, created_compositor_tree = _ensure_scene_compositor_tree(scene)
+        if node_tree is None:
+            caps = _describe_scene_compositor_capabilities(scene)
+            raise ExportWorkflowError(
+                "Compositor node tree is unavailable for rendered EXR export. "
+                f"Scene compositor-related attrs: {caps}"
+            )
+
+        nodes = node_tree.nodes
+        render_layers = nodes.new("CompositorNodeRLayers")
+        created_nodes.append(render_layers)
+        return render_layers
+
     try:
         if context.window:
             context.window.scene = scene
@@ -2395,31 +2410,10 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
             scene.render.film_transparent = True
         _apply_scene_exr_image_settings(scene)
         _apply_cycles_export_settings(scene)
-
-        node_tree, created_compositor_tree = _ensure_scene_compositor_tree(scene)
-        if node_tree is None:
-            caps = _describe_scene_compositor_capabilities(scene)
-            raise ExportWorkflowError(
-                "Compositor node tree is unavailable for rendered EXR export. "
-                f"Scene compositor-related attrs: {caps}"
-            )
-
-        nodes = node_tree.nodes
-        render_layers = nodes.new("CompositorNodeRLayers")
-        created_nodes.append(render_layers)
-
+        render_layers = None
         token = f"UVB_TMP_{uuid.uuid4().hex}"
         position_prefix = f"{token}_Position_"
         normal_prefix = f"{token}_Normal_"
-
-        image_socket = _find_compositor_output_socket(render_layers, ("Image", "Combined"))
-        if image_socket is None:
-            available = [sock.name for sock in render_layers.outputs]
-            available_text = ", ".join(available) if available else "(none)"
-            raise ExportWorkflowError(
-                "Required compositor passes were not found. "
-                f"Need Image/Combined. Available Render Layers outputs: {available_text}"
-            )
 
         if requires_what_to_show:
             what_to_show_identifier = _find_what_to_show_identifier(prepared.node_group)
@@ -2434,6 +2428,7 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
                 what_to_show_identifier,
             )
 
+        generated_normal = None
         if use_show_alph_composite:
             show_alph_identifier = _find_show_alph_identifier(prepared.node_group)
             if not show_alph_identifier:
@@ -2447,50 +2442,111 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
                 show_alph_identifier,
             )
 
-            _set_show_alph(prepared.node_group, temp_state.gn_modifier, False, reporter=report)
-            generated_position_rgb = _render_display_attribute_texture(
-                context,
-                scene,
-                view_layer,
-                render_layers,
-                temp_state,
-                prepared,
-                prepared.output_directory,
-                position_prefix,
-                eval_frame,
-                None,
-                reporter=report,
-            )
+            try:
+                _set_show_alph(prepared.node_group, temp_state.gn_modifier, False, reporter=report)
+                color_width, color_height, generated_position_rgb = _render_display_attribute_pixels(
+                    context,
+                    scene,
+                    view_layer,
+                    temp_state,
+                    prepared,
+                    eval_frame,
+                    None,
+                    reporter=report,
+                )
 
-            alpha_prefix = f"{token}_Alpha_"
-            _set_show_alph(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
-            generated_position_alpha = _render_display_attribute_texture(
-                context,
-                scene,
-                view_layer,
-                render_layers,
-                temp_state,
-                prepared,
-                prepared.output_directory,
-                alpha_prefix,
-                eval_frame,
-                None,
-                reporter=report,
-            )
-            _compose_rendered_exr_alpha(
-                scene,
-                position_path,
-                generated_position_rgb,
-                generated_position_alpha,
-            )
-            generated_position = position_path
-            for temp_path in (generated_position_rgb, generated_position_alpha):
-                if temp_path and os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
+                _set_show_alph(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
+                alpha_width, alpha_height, generated_position_alpha = _render_display_attribute_pixels(
+                    context,
+                    scene,
+                    view_layer,
+                    temp_state,
+                    prepared,
+                    eval_frame,
+                    None,
+                    reporter=report,
+                )
+                if color_width != alpha_width or color_height != alpha_height:
+                    raise ExportWorkflowError(
+                        f"RGB pass and alpha pass dimensions do not match: "
+                        f"{color_width}x{color_height} vs {alpha_width}x{alpha_height}."
+                    )
+                combined_pixels = _compose_rgb_and_alpha_pixels(
+                    generated_position_rgb,
+                    generated_position_alpha,
+                )
+                _save_float_exr_image(
+                    scene,
+                    position_path,
+                    color_width,
+                    color_height,
+                    combined_pixels,
+                )
+                generated_position = position_path
+            except ExportWorkflowError as exc:
+                report(
+                    {"WARNING"},
+                    "In-memory Render Result capture failed for RBD alpha export. "
+                    f"Falling back to compositor temp EXR files: {exc}",
+                )
+                render_layers = ensure_render_layers_node()
+                generated_position_rgb = None
+                generated_position_alpha = None
+                try:
+                    _set_show_alph(prepared.node_group, temp_state.gn_modifier, False, reporter=report)
+                    generated_position_rgb = _render_display_attribute_texture(
+                        context,
+                        scene,
+                        view_layer,
+                        render_layers,
+                        temp_state,
+                        prepared,
+                        prepared.output_directory,
+                        position_prefix,
+                        eval_frame,
+                        None,
+                        reporter=report,
+                    )
+                    alpha_prefix = f"{token}_Alpha_"
+                    _set_show_alph(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
+                    generated_position_alpha = _render_display_attribute_texture(
+                        context,
+                        scene,
+                        view_layer,
+                        render_layers,
+                        temp_state,
+                        prepared,
+                        prepared.output_directory,
+                        alpha_prefix,
+                        eval_frame,
+                        None,
+                        reporter=report,
+                    )
+                    _compose_rendered_exr_alpha(
+                        scene,
+                        position_path,
+                        generated_position_rgb,
+                        generated_position_alpha,
+                        reporter=report,
+                    )
+                    generated_position = position_path
+                finally:
+                    for temp_path in (generated_position_rgb, generated_position_alpha):
+                        if temp_path and os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
         else:
+            render_layers = ensure_render_layers_node()
+            image_socket = _find_compositor_output_socket(render_layers, ("Image", "Combined"))
+            if image_socket is None:
+                available = [sock.name for sock in render_layers.outputs]
+                available_text = ", ".join(available) if available else "(none)"
+                raise ExportWorkflowError(
+                    "Required compositor passes were not found. "
+                    f"Need Image/Combined. Available Render Layers outputs: {available_text}"
+                )
             generated_position = _render_display_attribute_texture(
                 context,
                 scene,
@@ -2504,25 +2560,24 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
                 WHAT_TO_SHOW_POSITION if requires_what_to_show else None,
                 reporter=report,
             )
-        generated_normal = None
-        if normal_path:
-            generated_normal = _render_display_attribute_texture(
-                context,
-                scene,
-                view_layer,
-                render_layers,
-                temp_state,
-                prepared,
-                prepared.output_directory,
-                normal_prefix,
-                eval_frame,
-                WHAT_TO_SHOW_NORMAL,
-                reporter=report,
-            )
+            if normal_path:
+                generated_normal = _render_display_attribute_texture(
+                    context,
+                    scene,
+                    view_layer,
+                    render_layers,
+                    temp_state,
+                    prepared,
+                    prepared.output_directory,
+                    normal_prefix,
+                    eval_frame,
+                    WHAT_TO_SHOW_NORMAL,
+                    reporter=report,
+                )
 
-        if os.path.exists(position_path):
+        if generated_position != position_path and os.path.exists(position_path):
             os.remove(position_path)
-        if normal_path and os.path.exists(normal_path):
+        if normal_path and generated_normal and generated_normal != normal_path and os.path.exists(normal_path):
             os.remove(normal_path)
 
         if generated_position != position_path:
@@ -2633,6 +2688,9 @@ def _write_display_attribute_texture_from_geometry(
         int(prepared.export_texture_width),
         int(prepared.export_texture_height),
         attribute_name="DisplayAttribute",
+        uv_layer_name=temp_state.selected_uv_name,
+        allow_partial=_is_rbd_mode(settings),
+        reporter=report,
     )
     _save_float_exr_image(scene, output_path, int(prepared.export_texture_width), int(prepared.export_texture_height), pixels)
 
@@ -2645,7 +2703,11 @@ def _read_display_attribute_pixels_via_realized_instances_probe(
     texture_width,
     texture_height,
     attribute_name="DisplayAttribute",
+    uv_layer_name=None,
+    allow_partial=False,
+    reporter=None,
 ):
+    report = reporter if reporter else (lambda _level, _message: None)
     if texture_width <= 0 or texture_height <= 0:
         raise ExportWorkflowError("Texture resolution must be positive for direct texel export.")
 
@@ -2676,7 +2738,26 @@ def _read_display_attribute_pixels_via_realized_instances_probe(
             raise ExportWorkflowError("Failed to evaluate realized Geometry Nodes mesh for direct texel export.")
 
         try:
-            return _rasterize_realized_attribute_mesh(eval_mesh, texture_width, texture_height, attribute_name)
+            report(
+                {"INFO"},
+                _describe_realized_texel_probe_mesh(
+                    eval_mesh,
+                    attribute_name,
+                    texture_width,
+                    texture_height,
+                    uv_layer_name=uv_layer_name,
+                    allow_partial=allow_partial,
+                ),
+            )
+            return _rasterize_realized_attribute_mesh(
+                eval_mesh,
+                texture_width,
+                texture_height,
+                attribute_name,
+                uv_layer_name=uv_layer_name,
+                allow_partial=allow_partial,
+                reporter=report,
+            )
         finally:
             eval_obj.to_mesh_clear()
     finally:
@@ -2704,34 +2785,133 @@ def _read_display_attribute_pixels_via_realized_instances_probe(
             context.window.scene = previous_window_scene
 
 
-def _rasterize_realized_attribute_mesh(mesh, texture_width, texture_height, attribute_name):
-    attributes = getattr(mesh, "attributes", None)
-    if attributes is None or attribute_name not in attributes:
-        available = []
-        if attributes is not None:
-            available = [str(getattr(attr, "name", "")) for attr in attributes]
-        available_text = ", ".join(name for name in available if name) if available else "(none)"
-        raise ExportWorkflowError(
-            f"Attribute '{attribute_name}' was not found on the realized Geometry Nodes mesh. "
-            f"Available attributes: {available_text}"
-        )
+def _get_mesh_uv_layer(mesh, preferred_name=None):
+    uv_layers = getattr(mesh, "uv_layers", None)
+    if uv_layers is None or len(uv_layers) == 0:
+        return None
 
-    attribute = attributes[attribute_name]
+    if preferred_name:
+        try:
+            layer = uv_layers.get(str(preferred_name))
+        except Exception:
+            layer = None
+        if layer is not None:
+            return layer
+
+    active = getattr(uv_layers, "active", None)
+    if active is not None:
+        return active
+
+    try:
+        return uv_layers[0]
+    except Exception:
+        return None
+
+
+def _summarize_mesh_uv_layers(mesh):
+    uv_layers = getattr(mesh, "uv_layers", None)
+    if uv_layers is None or len(uv_layers) == 0:
+        return "(none)"
+    names = []
+    for layer in uv_layers:
+        name = str(getattr(layer, "name", ""))
+        if name:
+            names.append(name)
+    return ", ".join(names) if names else "(unnamed)"
+
+
+def _describe_realized_texel_probe_mesh(
+    mesh,
+    attribute_name,
+    texture_width,
+    texture_height,
+    uv_layer_name=None,
+    allow_partial=False,
+):
+    attributes = getattr(mesh, "attributes", None)
+    attribute = None
+    if attributes is not None and attribute_name in attributes:
+        attribute = attributes[attribute_name]
+
+    selected_uv = _get_mesh_uv_layer(mesh, uv_layer_name)
+    selected_uv_name = getattr(selected_uv, "name", None) if selected_uv is not None else None
+    attribute_domain = getattr(attribute, "domain", "(missing)") if attribute is not None else "(missing)"
+    attribute_data_type = getattr(attribute, "data_type", "(missing)") if attribute is not None else "(missing)"
+    attribute_count = len(attribute.data) if attribute is not None else 0
+    return (
+        "Direct texel probe mesh summary: "
+        f"verts={len(mesh.vertices)}, polys={len(mesh.polygons)}, loops={len(mesh.loops)}, "
+        f"target={texture_width}x{texture_height}, "
+        f"attribute='{attribute_name}' domain={attribute_domain} type={attribute_data_type} count={attribute_count}, "
+        f"requested_uv='{uv_layer_name}', selected_uv='{selected_uv_name}', "
+        f"uv_layers=[{_summarize_mesh_uv_layers(mesh)}], allow_partial={bool(allow_partial)}"
+    )
+
+
+def _resolve_polygon_pixel_from_uv(mesh, polygon, texture_width, texture_height, uv_layer_name=None):
+    uv_layer = _get_mesh_uv_layer(mesh, uv_layer_name)
+    if uv_layer is None:
+        return None
+
+    loop_indices = list(getattr(polygon, "loop_indices", ()))
+    if not loop_indices:
+        return None
+
+    total_u = 0.0
+    total_v = 0.0
+    sample_count = 0
+
+    for loop_index in loop_indices:
+        try:
+            uv = uv_layer.data[int(loop_index)].uv
+        except Exception:
+            continue
+        total_u += float(uv[0])
+        total_v += float(uv[1])
+        sample_count += 1
+
+    if sample_count <= 0:
+        return None
+
+    u = total_u / float(sample_count)
+    v = total_v / float(sample_count)
+    pixel_x = max(0, min(texture_width - 1, int(u * float(texture_width))))
+    pixel_y = max(0, min(texture_height - 1, int(v * float(texture_height))))
+    return pixel_x, pixel_y
+
+
+def _resolve_polygon_pixel_from_position(mesh, polygon, texture_width, texture_height):
+    vertex_indices = list(polygon.vertices)
+    if not vertex_indices:
+        return None
+
+    center_x = sum(float(mesh.vertices[index].co.x) for index in vertex_indices) / float(len(vertex_indices))
+    center_y = sum(float(mesh.vertices[index].co.y) for index in vertex_indices) / float(len(vertex_indices))
+    pixel_x = int(round(((center_x + 0.5) * float(texture_width)) - 0.5))
+    pixel_y = int(round(((center_y + 0.5) * float(texture_height)) - 0.5))
+    if pixel_x < 0 or pixel_x >= texture_width or pixel_y < 0 or pixel_y >= texture_height:
+        return None
+    return pixel_x, pixel_y
+
+
+def _rasterize_realized_attribute_mesh_with_locator(
+    mesh,
+    texture_width,
+    texture_height,
+    attribute,
+    pixel_locator,
+):
     pixels = [0.0] * (texture_width * texture_height * 4)
     write_counts = [0] * (texture_width * texture_height)
+    mapped_polygons = 0
 
     for poly in mesh.polygons:
-        vertex_indices = list(poly.vertices)
-        if not vertex_indices:
+        pixel = pixel_locator(mesh, poly, texture_width, texture_height)
+        if pixel is None:
             continue
+        mapped_polygons += 1
 
-        center_x = sum(float(mesh.vertices[index].co.x) for index in vertex_indices) / float(len(vertex_indices))
-        center_y = sum(float(mesh.vertices[index].co.y) for index in vertex_indices) / float(len(vertex_indices))
-        pixel_x = int(round(((center_x + 0.5) * float(texture_width)) - 0.5))
-        pixel_y = int(round(((center_y + 0.5) * float(texture_height)) - 0.5))
-        if pixel_x < 0 or pixel_x >= texture_width or pixel_y < 0 or pixel_y >= texture_height:
-            continue
-
+        pixel_x, pixel_y = pixel
         rgba = _average_polygon_attribute_rgba(attribute, poly)
         pixel_index = (pixel_y * texture_width) + pixel_x
         base = pixel_index * 4
@@ -2746,13 +2926,111 @@ def _rasterize_realized_attribute_mesh(mesh, texture_width, texture_height, attr
         write_counts[pixel_index] = previous_count + 1
 
     missing_count = sum(1 for count in write_counts if count == 0)
-    if missing_count:
+    filled_texels = sum(1 for count in write_counts if count > 0)
+    overlapping_texels = sum(1 for count in write_counts if count > 1)
+    max_stack = max(write_counts) if write_counts else 0
+    return pixels, {
+        "missing_count": missing_count,
+        "filled_texels": filled_texels,
+        "overlapping_texels": overlapping_texels,
+        "max_stack": max_stack,
+        "mapped_polygons": mapped_polygons,
+        "total_polygons": len(mesh.polygons),
+    }
+
+
+def _format_texel_attempt_stats(label, stats, texture_width, texture_height):
+    total_texels = texture_width * texture_height
+    filled = int(stats.get("filled_texels", 0))
+    missing = int(stats.get("missing_count", total_texels))
+    overlap = int(stats.get("overlapping_texels", 0))
+    max_stack = int(stats.get("max_stack", 0))
+    mapped_polygons = int(stats.get("mapped_polygons", 0))
+    total_polygons = int(stats.get("total_polygons", 0))
+    fill_percent = (float(filled) / float(total_texels) * 100.0) if total_texels > 0 else 0.0
+    return (
+        f"{label}: filled={filled}/{total_texels} ({fill_percent:.2f}%), "
+        f"missing={missing}, overlapping_texels={overlap}, max_stack={max_stack}, "
+        f"mapped_polygons={mapped_polygons}/{total_polygons}"
+    )
+
+
+def _rasterize_realized_attribute_mesh(
+    mesh,
+    texture_width,
+    texture_height,
+    attribute_name,
+    uv_layer_name=None,
+    allow_partial=False,
+    reporter=None,
+):
+    report = reporter if reporter else (lambda _level, _message: None)
+    attributes = getattr(mesh, "attributes", None)
+    if attributes is None or attribute_name not in attributes:
+        available = []
+        if attributes is not None:
+            available = [str(getattr(attr, "name", "")) for attr in attributes]
+        available_text = ", ".join(name for name in available if name) if available else "(none)"
         raise ExportWorkflowError(
-            "Direct texel export could not map all pixels from the realized Geometry Nodes mesh. "
-            f"Missing texels: {missing_count}/{texture_width * texture_height}"
+            f"Attribute '{attribute_name}' was not found on the realized Geometry Nodes mesh. "
+            f"Available attributes: {available_text}"
         )
 
-    return pixels
+    attribute = attributes[attribute_name]
+
+    attempts = []
+    if _get_mesh_uv_layer(mesh, uv_layer_name) is not None:
+        attempts.append(
+            (
+                f"UV layer '{getattr(_get_mesh_uv_layer(mesh, uv_layer_name), 'name', uv_layer_name)}'",
+                lambda m, p, w, h: _resolve_polygon_pixel_from_uv(m, p, w, h, uv_layer_name=uv_layer_name),
+            )
+        )
+    attempts.append(
+        (
+            "helper-plane XY positions",
+            _resolve_polygon_pixel_from_position,
+        )
+    )
+
+    best_pixels = None
+    best_missing = None
+    best_label = None
+    attempt_summaries = []
+
+    for label, locator in attempts:
+        pixels, stats = _rasterize_realized_attribute_mesh_with_locator(
+            mesh,
+            texture_width,
+            texture_height,
+            attribute,
+            locator,
+        )
+        missing_count = int(stats["missing_count"])
+        attempt_text = _format_texel_attempt_stats(label, stats, texture_width, texture_height)
+        attempt_summaries.append(attempt_text)
+        report({"INFO"}, f"Direct texel mapping attempt: {attempt_text}")
+        if best_missing is None or missing_count < best_missing:
+            best_pixels = pixels
+            best_missing = missing_count
+            best_label = label
+            best_stats = stats
+        if missing_count == 0:
+            return pixels
+
+    if allow_partial and best_pixels is not None:
+        report(
+            {"INFO"},
+            "Direct texel export accepted sparse occupancy: "
+            f"{_format_texel_attempt_stats(best_label, best_stats, texture_width, texture_height)}",
+        )
+        return best_pixels
+
+    raise ExportWorkflowError(
+        "Direct texel export could not map all pixels from the realized Geometry Nodes mesh. "
+        f"Best method: {best_label}. Missing texels: {best_missing}/{texture_width * texture_height}. "
+        f"Attempts: {' | '.join(attempt_summaries)}"
+    )
 
 
 def _average_polygon_attribute_rgba(attribute, polygon):
@@ -2831,20 +3109,150 @@ def _compose_rgb_and_alpha_pixels(color_pixels, alpha_pixels):
     return combined
 
 
-def _load_image_pixels_from_file(filepath):
-    image = bpy.data.images.load(filepath, check_existing=False)
+def _get_render_result_image():
+    for image in bpy.data.images:
+        if getattr(image, "type", "") == "RENDER_RESULT":
+            return image
+    return bpy.data.images.get("Render Result")
+
+
+def _copy_image_pixels(image, source_label):
+    if image is None:
+        raise ExportWorkflowError(f"{source_label} image was not available after render.")
+
     try:
-        pixels = [0.0] * len(image.pixels)
+        image.update()
+    except Exception:
+        pass
+
+    width = int(image.size[0]) if len(image.size) >= 2 else 0
+    height = int(image.size[1]) if len(image.size) >= 2 else 0
+    if width <= 0 or height <= 0:
+        raise ExportWorkflowError(
+            f"{source_label} image had invalid dimensions: {width}x{height}."
+        )
+
+    expected = width * height * 4
+    pixels = [0.0] * expected
+    try:
         image.pixels.foreach_get(pixels)
-        return int(image.size[0]), int(image.size[1]), pixels
-    finally:
-        try:
-            bpy.data.images.remove(image, do_unlink=True)
-        except Exception:
-            pass
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to read RGBA pixels from {source_label}: {exc}"
+        ) from exc
+
+    if len(pixels) != expected:
+        raise ExportWorkflowError(
+            f"{source_label} pixel buffer size mismatch: expected {expected}, got {len(pixels)}."
+        )
+
+    return width, height, pixels
 
 
-def _compose_rendered_exr_alpha(scene, output_path, color_path, alpha_path):
+def _render_display_attribute_pixels(
+    context,
+    scene,
+    view_layer,
+    temp_state,
+    prepared,
+    evaluate_frame,
+    what_to_show_mode,
+    reporter=None,
+):
+    report = reporter if reporter else (lambda _level, _message: None)
+    if what_to_show_mode:
+        report({"INFO"}, f"Rendering DisplayAttribute for WhatToShow='{what_to_show_mode}'...")
+        _set_what_to_show_mode(prepared.node_group, temp_state.gn_modifier, what_to_show_mode, reporter=report)
+    else:
+        report({"INFO"}, "Rendering DisplayAttribute...")
+
+    scene.frame_set(int(evaluate_frame))
+    with context.temp_override(scene=scene, view_layer=view_layer):
+        result = bpy.ops.render.render(write_still=False, use_viewport=False)
+
+    if "FINISHED" not in result:
+        raise ExportWorkflowError(
+            f"Render operation did not finish successfully for WhatToShow='{what_to_show_mode}'."
+        )
+
+    return _copy_image_pixels(_get_render_result_image(), "Render Result")
+
+
+def _load_image_pixels_from_file(filepath):
+    deadline = time.monotonic() + 5.0
+    last_problem = "unknown"
+
+    while True:
+        if not os.path.exists(filepath):
+            last_problem = "file does not exist yet"
+        else:
+            try:
+                file_size = int(os.path.getsize(filepath))
+            except OSError as exc:
+                file_size = -1
+                last_problem = f"could not read file size: {exc}"
+            else:
+                if file_size <= 0:
+                    last_problem = f"file size is {file_size} bytes"
+                else:
+                    image = None
+                    try:
+                        image = bpy.data.images.load(filepath, check_existing=False)
+                        try:
+                            image.reload()
+                        except Exception:
+                            pass
+                        try:
+                            image.update()
+                        except Exception:
+                            pass
+
+                        width = int(image.size[0]) if len(image.size) >= 2 else 0
+                        height = int(image.size[1]) if len(image.size) >= 2 else 0
+                        if width > 0 and height > 0:
+                            expected = width * height * 4
+                            pixels = [0.0] * expected
+                            image.pixels.foreach_get(pixels)
+                            return width, height, pixels
+
+                        last_problem = (
+                            f"loaded image dimensions were {width}x{height} "
+                            f"(file size {file_size} bytes)"
+                        )
+                    except Exception as exc:
+                        last_problem = f"image load failed: {exc}"
+                    finally:
+                        if image is not None:
+                            try:
+                                bpy.data.images.remove(image, do_unlink=True)
+                            except Exception:
+                                pass
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+
+    raise ExportWorkflowError(
+        "Loaded EXR image did not become readable within 5.0 seconds. "
+        f"Path: {filepath}. Last observed problem: {last_problem}."
+    )
+
+
+def _describe_debug_file_state(filepath):
+    exists = os.path.exists(filepath)
+    if not exists:
+        return f"path='{filepath}', exists=False"
+    try:
+        size = os.path.getsize(filepath)
+    except OSError as exc:
+        return f"path='{filepath}', exists=True, size_error={exc}"
+    return f"path='{filepath}', exists=True, size={size} bytes"
+
+
+def _compose_rendered_exr_alpha(scene, output_path, color_path, alpha_path, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
+    report({"INFO"}, f"Compositing temp EXR RGB pass: {_describe_debug_file_state(color_path)}")
+    report({"INFO"}, f"Compositing temp EXR Alpha pass: {_describe_debug_file_state(alpha_path)}")
     color_width, color_height, color_pixels = _load_image_pixels_from_file(color_path)
     alpha_width, alpha_height, alpha_pixels = _load_image_pixels_from_file(alpha_path)
     if color_width != alpha_width or color_height != alpha_height:
@@ -3831,6 +4239,154 @@ def _create_or_overwrite_named_scene(scene_name):
     bpy.data.scenes.remove(existing, do_unlink=True)
     replacement.name = scene_name
     return replacement
+
+
+def _iter_collection_descendants(collection):
+    descendants = []
+    if collection is None:
+        return descendants
+    for child in collection.children:
+        descendants.append(child)
+        descendants.extend(_iter_collection_descendants(child))
+    return descendants
+
+
+def _dedupe_ids(items):
+    unique = []
+    seen = set()
+    for item in items:
+        if item is None:
+            continue
+        try:
+            key = item.as_pointer()
+        except Exception:
+            key = id(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _remove_id_fallback(data_block):
+    if data_block is None:
+        return False
+
+    managers = (
+        ("scenes", bpy.types.Scene),
+        ("objects", bpy.types.Object),
+        ("collections", bpy.types.Collection),
+        ("meshes", bpy.types.Mesh),
+        ("cameras", bpy.types.Camera),
+        ("node_groups", bpy.types.NodeTree),
+        ("worlds", bpy.types.World),
+        ("materials", bpy.types.Material),
+        ("images", bpy.types.Image),
+    )
+    for manager_name, manager_type in managers:
+        try:
+            if not isinstance(data_block, manager_type):
+                continue
+        except Exception:
+            continue
+        manager = getattr(bpy.data, manager_name, None)
+        if manager is None:
+            continue
+        try:
+            manager.remove(data_block, do_unlink=True)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _remove_unused_data_blocks(data_blocks):
+    removable = []
+    for data_block in _dedupe_ids(data_blocks):
+        try:
+            users = int(getattr(data_block, "users", 0))
+        except Exception:
+            users = 0
+        if users == 0:
+            removable.append(data_block)
+
+    if not removable:
+        return 0
+
+    if hasattr(bpy.data, "batch_remove"):
+        try:
+            bpy.data.batch_remove(removable)
+            return len(removable)
+        except Exception:
+            pass
+
+    removed = 0
+    for data_block in removable:
+        if _remove_id_fallback(data_block):
+            removed += 1
+    return removed
+
+
+def _cleanup_temporary_scene(temp_state):
+    temp_scene = getattr(temp_state, "scene", None)
+    if temp_scene is None:
+        return "Temporary compute scene cleanup skipped: no scene was created."
+
+    if bpy.data.scenes.get(temp_scene.name) is None:
+        return f"Temporary compute scene '{temp_scene.name}' was already removed."
+
+    window_manager = getattr(bpy.context, "window_manager", None)
+    replacement_scene = None
+    for scene in bpy.data.scenes:
+        if scene != temp_scene:
+            replacement_scene = scene
+            break
+
+    if window_manager is not None and replacement_scene is not None:
+        for window in window_manager.windows:
+            try:
+                if window.scene == temp_scene:
+                    window.scene = replacement_scene
+            except Exception:
+                pass
+
+    temp_objects = list(temp_scene.objects)
+    temp_object_data = [getattr(obj, "data", None) for obj in temp_objects if getattr(obj, "data", None) is not None]
+    temp_child_collections = _iter_collection_descendants(temp_scene.collection)
+    cleanup_candidates = [
+        temp_scene.collection,
+        getattr(temp_scene, "world", None),
+        getattr(getattr(temp_state, "gn_modifier", None), "node_group", None),
+        *temp_object_data,
+        *temp_child_collections,
+    ]
+
+    removed_objects = 0
+    for obj in temp_objects:
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed_objects += 1
+        except Exception:
+            pass
+
+    scene_removed = False
+    try:
+        bpy.data.scenes.remove(temp_scene, do_unlink=True)
+        scene_removed = True
+    except Exception:
+        scene_removed = False
+
+    removed_data_blocks = _remove_unused_data_blocks(cleanup_candidates)
+    scene_name = getattr(temp_scene, "name", "VAT_Compute_Scene")
+    if scene_removed:
+        return (
+            f"Removed temporary compute scene '{scene_name}' "
+            f"({removed_objects} objects, {removed_data_blocks} related data-blocks)."
+        )
+    return (
+        f"Removed {removed_objects} temporary objects and {removed_data_blocks} related data-blocks, "
+        f"but scene '{scene_name}' could not be removed."
+    )
 
 
 def _build_texture_prefix(settings, asset_name):

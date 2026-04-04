@@ -88,7 +88,11 @@ class UVB_PG_settings(PropertyGroup):
         name="Texture Naming Pattern",
         default="T_{asset_name}_{attribute}",
     )
-    keep_temporary_scene: BoolProperty(name="Keep Temporary Scene", default=True)
+    keep_temporary_scene: BoolProperty(
+        name="Keep Temporary Scene",
+        description="Keep the temporary export scene and related data blocks for debugging",
+        default=True,
+    )
 
 
 CLASSES = (UVB_PG_settings,)

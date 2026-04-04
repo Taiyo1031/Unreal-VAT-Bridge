@@ -58,6 +58,7 @@ The property definitions live in [properties.py](/Users/taiyoparent/Documents/Gi
 Current panels:
 
 - main panel: `UVB_PT_main`
+- top-level panel: `UVB_PT_debug`
 - child panel: `UVB_PT_advanced`
 - child panel: `UVB_PT_custom_attributes`
 
@@ -65,15 +66,15 @@ Current panels:
 
 The main panel currently renders these sections in order:
 
-1. `Mode`
-2. `Source`
-3. `Frame Settings`
-4. `Output`
-5. `Image Export Settings`
-6. `Export Options`
-7. `Export Action`
-8. `Future Panels Placeholder`
-9. small top version label showing `v12`
+1. small top version label showing `v12`
+2. `Mode`
+3. `Source`
+4. `Frame Settings`
+5. `Output`
+6. `Image Export Settings`
+7. `Export Options`
+8. `Export Action`
+9. `Future Panels Placeholder`
 
 ### Mode Section
 
@@ -169,17 +170,36 @@ Current action:
 
 - `Export` button bound to `unreal_vat_bridge.export`
 
+Current runtime behavior:
+
+- while export is running, the Blender footer/status bar shows stage-based progress with a percentage via `window_manager.progress_*`
+- the footer text is updated with the current phase, such as validation, temp scene creation, bake, texture export, JSON export, or FBX export
+
+### Debug Panel
+
+Current field:
+
+- `Keep Temporary Scene`
+
+Behavior:
+
+- this panel is top-level in the sidebar, not nested under `Advanced`
+- it is registered as a normal top-level panel, not collapsed-by-default
+- the checkbox is presented through an operator-style toggle row so it remains clickable even when direct RNA property UI is stale
+- when enabled, the temp export scene is retained for debugging
+- when disabled, the add-on removes the temp scene at the end and also removes the related orphaned data-blocks created for that export when possible
+
+### UI Version Label
+
+- the small version text in the main panel is sourced from `constants.UI_VERSION_LABEL`
+- when the visible UI version changes, `constants.UI_VERSION_LABEL` must be updated so the panel stays in sync
+
 ### Advanced Panel
 
 The `Advanced` child panel currently exposes:
 
 - `Texture Prefix`
 - `Texture Naming Pattern`
-- `Keep Temporary Scene` as disabled/read-only
-
-It also shows the note:
-
-- `Temporary scene is currently retained for debug.`
 
 ### Custom Attributes Panel
 
@@ -251,7 +271,7 @@ Important temporary objects:
 - reference object name pattern: `VAT_RefFrameOBJ`
 - RBD reference collection name pattern: `VAT_RefFrameCollection`
 
-The temp scene is currently retained for debugging instead of being fully deleted at the end.
+Whether the temp scene is retained or deleted is controlled by the `Keep Temporary Scene` checkbox in the `Deb` section.
 
 ## Geometry Nodes Contract
 
@@ -334,14 +354,18 @@ The current preferred path is:
 1. set `WhatToShow`
 2. realize helper output to mesh through a probe GN group
 3. read `DisplayAttribute` directly from realized geometry
-4. rasterize the realized quads into pixels in Python
+4. rasterize the realized quads into pixels in Python, preferring the selected UV layer and falling back to helper-plane XY positions only if needed
 5. save a float EXR image directly
 
 This direct texel path was introduced to avoid black edge artifacts caused by render/compositor sampling.
+In RBD mode, sparse occupancy is allowed in this direct path, so unused texels are left at zero instead of treating the export as failed.
+Current debug logging reports realized-mesh counts, available/selected UV layers, attribute domain/type, per-attempt texel coverage, and temporary EXR file state when render fallback is used.
 
 If direct texel export fails, the code still has a render-based fallback path.
 The render fallback uses `DisplayAttribute` RGB for emission and `DisplayAttribute` alpha for material transparency so the EXR alpha channel is preserved.
 For RBD, `ShowAlph` is toggled `OFF` and `ON` to create two passes, and the second pass is merged into the final EXR alpha channel.
+The current RBD render fallback first tries Blender's in-memory `Render Result`, and if that is unavailable in the running Blender build, it falls back to temporary EXR files on disk before alpha composition.
+When reading those temporary EXR files back, the add-on waits briefly for the files to become readable before treating the fallback as failed.
 
 ### Current Export Outputs
 
@@ -563,8 +587,6 @@ Vertex mode still uses the single joined `VAT_RefFrameOBJ` path.
 
 These exist in the repo but are not the main source of truth:
 
-- [unreal_vat_bridge/workflow.py.bak](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py.bak)
-- [unreal_vat_bridge/assets/vat_nodes.blend1](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend1)
 - `__pycache__` files
 - generated zip in `dist/`
 

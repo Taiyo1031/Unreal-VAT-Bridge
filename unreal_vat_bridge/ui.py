@@ -39,7 +39,7 @@ class UVB_PT_main(Panel):
 
         version_row = layout.row()
         version_row.scale_y = 0.65
-        version_row.label(text="v12")
+        version_row.label(text=constants.UI_VERSION_LABEL)
 
         mode_box = layout.box()
         mode_box.label(text="Mode")
@@ -159,10 +159,6 @@ class UVB_PT_advanced(Panel):
         settings = context.scene.unreal_vat_bridge
         layout.prop(settings, "texture_prefix", text="Texture Prefix")
         layout.prop(settings, "texture_naming_pattern", text="Texture Naming Pattern")
-        keep_row = layout.row()
-        keep_row.enabled = False
-        keep_row.prop(settings, "keep_temporary_scene", text="Keep Temporary Scene")
-        layout.label(text="Temporary scene is currently retained for debug.")
 
 
 class UVB_PT_custom_attributes(Panel):
@@ -180,8 +176,37 @@ class UVB_PT_custom_attributes(Panel):
         layout.label(text="Built-in exports currently depend on mode.")
 
 
+class UVB_PT_debug(Panel):
+    bl_idname = "UVB_PT_debug"
+    bl_label = "Debug"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = constants.PANEL_CATEGORY
+    bl_order = 100
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.unreal_vat_bridge
+
+        if hasattr(settings, "keep_temporary_scene"):
+            is_enabled = bool(getattr(settings, "keep_temporary_scene", True))
+            icon = "CHECKBOX_HLT" if is_enabled else "CHECKBOX_DEHLT"
+            row = layout.row()
+            row.operator(
+                "unreal_vat_bridge.toggle_keep_temporary_scene",
+                text="Keep Temporary Scene",
+                icon=icon,
+                emboss=False,
+            )
+        else:
+            layout.label(text="Keep Temporary Scene: unavailable (reload addon)", icon="ERROR")
+        layout.label(text="On: keep temp scene for debug.")
+        layout.label(text="Off: remove temp scene and related data blocks.")
+
+
 CLASSES = (
     UVB_PT_main,
+    UVB_PT_debug,
     UVB_PT_advanced,
     UVB_PT_custom_attributes,
 )
@@ -189,6 +214,10 @@ CLASSES = (
 
 def register():
     for cls in CLASSES:
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
         bpy.utils.register_class(cls)
 
 
