@@ -190,6 +190,7 @@ Behavior:
 - it uses the normal Blender property checkbox UI
 - when enabled, the temp export scene is retained for debugging
 - when disabled, the add-on removes the temp scene at the end and also removes the related orphaned data-blocks created for that export when possible
+- cleanup now uses conservative per-ID removal (instead of aggressive `batch_remove`) to avoid Blender instability/crashes during teardown
 - the panel includes a short one-line explanation of the on/off behavior
 
 ### Tooltip Policy

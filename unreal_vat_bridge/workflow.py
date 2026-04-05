@@ -4303,22 +4303,22 @@ def _remove_id_fallback(data_block):
 def _remove_unused_data_blocks(data_blocks):
     removable = []
     for data_block in _dedupe_ids(data_blocks):
+        if data_block is None:
+            continue
+        try:
+            # Accessing RNA props can raise once the underlying ID is already freed.
+            _ = data_block.name
+        except Exception:
+            continue
         try:
             users = int(getattr(data_block, "users", 0))
         except Exception:
-            users = 0
+            continue
         if users == 0:
             removable.append(data_block)
 
     if not removable:
         return 0
-
-    if hasattr(bpy.data, "batch_remove"):
-        try:
-            bpy.data.batch_remove(removable)
-            return len(removable)
-        except Exception:
-            pass
 
     removed = 0
     for data_block in removable:
@@ -4341,6 +4341,10 @@ def _cleanup_temporary_scene(temp_state):
         if scene != temp_scene:
             replacement_scene = scene
             break
+    if replacement_scene is None:
+        replacement_scene = bpy.data.scenes.new(
+            _unique_name("Scene", bpy.data.scenes.keys())
+        )
 
     if window_manager is not None and replacement_scene is not None:
         for window in window_manager.windows:
@@ -4352,13 +4356,10 @@ def _cleanup_temporary_scene(temp_state):
 
     temp_objects = list(temp_scene.objects)
     temp_object_data = [getattr(obj, "data", None) for obj in temp_objects if getattr(obj, "data", None) is not None]
-    temp_child_collections = _iter_collection_descendants(temp_scene.collection)
+    runtime_node_group = getattr(getattr(temp_state, "gn_modifier", None), "node_group", None)
     cleanup_candidates = [
-        temp_scene.collection,
-        getattr(temp_scene, "world", None),
-        getattr(getattr(temp_state, "gn_modifier", None), "node_group", None),
+        runtime_node_group,
         *temp_object_data,
-        *temp_child_collections,
     ]
 
     removed_objects = 0
