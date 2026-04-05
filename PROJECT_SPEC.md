@@ -18,30 +18,30 @@ When behavior changes, this file should be updated in the same change set.
 
 ## Source Of Truth
 
-- Add-on package: [unreal_vat_bridge](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge)
-- Main workflow implementation: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py)
-- Blender Geometry Nodes asset: [vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend)
-- Packaging script: [package.sh](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/package.sh)
+- Add-on package: [unreal_vat_bridge](unreal_vat_bridge)
+- Main workflow implementation: [workflow.py](unreal_vat_bridge/workflow.py)
+- Blender Geometry Nodes asset: [vat_nodes.blend](unreal_vat_bridge/assets/vat_nodes.blend)
+- Packaging script: [package.sh](package.sh)
 
 ## Current Target Environment
 
 - Blender: `5.1.x`
-- Add-on entry point: [__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py)
-- Current workflow build id is defined in [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py)
+- Add-on entry point: [__init__.py](unreal_vat_bridge/__init__.py)
+- Current workflow build id is defined in [workflow.py](unreal_vat_bridge/workflow.py)
 
 ## Repository Layout
 
-- [README.md](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/README.md): very short project readme
-- [PROJECT_SPEC.md](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/PROJECT_SPEC.md): this document
-- [package.sh](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/package.sh): creates installable zip
-- [unreal_vat_bridge/__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py): Blender add-on registration and `bl_info`
-- [unreal_vat_bridge/constants.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/constants.py): names, modes, temp object identifiers, suffixes
-- [unreal_vat_bridge/properties.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/properties.py): scene property group
-- [unreal_vat_bridge/ui.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/ui.py): sidebar UI
-- [unreal_vat_bridge/operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py): export operator and JSON copy operator
-- [unreal_vat_bridge/preview.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/preview.py): preview math for texture sizing
-- [unreal_vat_bridge/workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py): end-to-end export system
-- [unreal_vat_bridge/assets/vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend): Geometry Nodes groups used at runtime
+- [README.md](README.md): very short project readme
+- [PROJECT_SPEC.md](PROJECT_SPEC.md): this document
+- [package.sh](package.sh): creates installable zip
+- [unreal_vat_bridge/__init__.py](unreal_vat_bridge/__init__.py): Blender add-on registration and `bl_info`
+- [unreal_vat_bridge/constants.py](unreal_vat_bridge/constants.py): names, modes, temp object identifiers, suffixes
+- [unreal_vat_bridge/properties.py](unreal_vat_bridge/properties.py): scene property group
+- [unreal_vat_bridge/ui.py](unreal_vat_bridge/ui.py): sidebar UI
+- [unreal_vat_bridge/operators.py](unreal_vat_bridge/operators.py): export operator and JSON copy operator
+- [unreal_vat_bridge/preview.py](unreal_vat_bridge/preview.py): preview math for texture sizing
+- [unreal_vat_bridge/workflow.py](unreal_vat_bridge/workflow.py): end-to-end export system
+- [unreal_vat_bridge/assets/vat_nodes.blend](unreal_vat_bridge/assets/vat_nodes.blend): Geometry Nodes groups used at runtime
 
 ## User-Facing UI
 
@@ -51,7 +51,7 @@ The add-on panel lives in:
 
 The UI implementation is part of the project spec and should be kept in sync with code changes.
 
-The property definitions live in [properties.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/properties.py) and the drawing logic lives in [ui.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/ui.py).
+The property definitions live in [properties.py](unreal_vat_bridge/properties.py) and the drawing logic lives in [ui.py](unreal_vat_bridge/ui.py).
 
 ### Panel Structure
 
@@ -229,7 +229,7 @@ Important settings currently exposed somewhere in the UI:
 
 ## High-Level Runtime Flow
 
-The main entry point is `UVB_OT_export.execute()` in [operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py), which reloads [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py) and calls `run_export(...)`.
+The main entry point is `UVB_OT_export.execute()` in [operators.py](unreal_vat_bridge/operators.py), which reloads [workflow.py](unreal_vat_bridge/workflow.py) and calls `run_export(...)`.
 
 `run_export(...)` currently performs:
 
@@ -248,15 +248,15 @@ The main entry point is `UVB_OT_export.execute()` in [operators.py](/Users/taiyo
 
 Key functions:
 
-- `run_export`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L68)
-- `_validate_and_prepare`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L140)
-- `_create_temporary_scene`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L236)
-- `_apply_ui_values_to_gn_transfer_layer`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L480)
-- `_bake_geometry_nodes_animation_node`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L700)
-- `_apply_end_frame_export_settings`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L865)
-- `_export_rendered_textures`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L1888)
-- `_export_json_metadata`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L2889)
-- `_export_mesh_fbx`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L2945)
+- `run_export`: [workflow.py](unreal_vat_bridge/workflow.py#L68)
+- `_validate_and_prepare`: [workflow.py](unreal_vat_bridge/workflow.py#L140)
+- `_create_temporary_scene`: [workflow.py](unreal_vat_bridge/workflow.py#L236)
+- `_apply_ui_values_to_gn_transfer_layer`: [workflow.py](unreal_vat_bridge/workflow.py#L480)
+- `_bake_geometry_nodes_animation_node`: [workflow.py](unreal_vat_bridge/workflow.py#L700)
+- `_apply_end_frame_export_settings`: [workflow.py](unreal_vat_bridge/workflow.py#L865)
+- `_export_rendered_textures`: [workflow.py](unreal_vat_bridge/workflow.py#L1888)
+- `_export_json_metadata`: [workflow.py](unreal_vat_bridge/workflow.py#L2889)
+- `_export_mesh_fbx`: [workflow.py](unreal_vat_bridge/workflow.py#L2945)
 
 ## Temporary Scene System
 
@@ -275,7 +275,7 @@ Whether the temp scene is retained or deleted is controlled by the `Keep Tempora
 
 ## Geometry Nodes Contract
 
-The Python side expects specific GN group names from [vat_nodes.blend](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/assets/vat_nodes.blend):
+The Python side expects specific GN group names from [vat_nodes.blend](unreal_vat_bridge/assets/vat_nodes.blend):
 
 - `ComputeVertexVAT`
 - `ComputeRBDtoVAT`
@@ -440,7 +440,7 @@ This means the FBX should represent the final Geometry Nodes export mesh, not th
 
 Relevant function:
 
-- `_export_mesh_fbx`: [workflow.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/workflow.py#L2945)
+- `_export_mesh_fbx`: [workflow.py](unreal_vat_bridge/workflow.py#L2945)
 
 ## JSON Export Spec
 
@@ -483,7 +483,7 @@ This is intended to map cleanly onto Unreal-side `FVector` parsing without needi
 
 ## Preview / Sizing Logic
 
-Preview and texture sizing logic are currently simple and live in [preview.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/preview.py).
+Preview and texture sizing logic are currently simple and live in [preview.py](unreal_vat_bridge/preview.py).
 
 Current logic:
 
@@ -503,7 +503,7 @@ Create the distributable zip by running:
 
 It produces:
 
-- [dist/unreal_vat_bridge.zip](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/dist/unreal_vat_bridge.zip)
+- [dist/unreal_vat_bridge.zip](dist/unreal_vat_bridge.zip)
 
 Important packaging constraints:
 
@@ -525,9 +525,9 @@ Blender can keep stale Python modules cached across addon reinstalls or reloads.
 
 Current mitigation:
 
-- [__init__.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/__init__.py) reloads submodules when the addon is reloaded
-- [operators.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/operators.py) reloads `constants`, `preview`, and `workflow` before export
-- [properties.py](/Users/taiyoparent/Documents/GitHub/Unreal-VAT-Bridge/unreal_vat_bridge/properties.py) defensively re-registers the scene property group on addon enable
+- [__init__.py](unreal_vat_bridge/__init__.py) reloads submodules when the addon is reloaded
+- [operators.py](unreal_vat_bridge/operators.py) reloads `constants`, `preview`, and `workflow` before export
+- [properties.py](unreal_vat_bridge/properties.py) defensively re-registers the scene property group on addon enable
 - mode helpers tolerate legacy `RIGID` values and missing newer constants during transition
 
 This reduces mixed-version errors such as a new `workflow.py` reading an old cached `constants.py`.
