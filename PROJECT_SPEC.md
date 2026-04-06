@@ -249,15 +249,15 @@ The main entry point is `UVB_OT_export.execute()` in [operators.py](unreal_vat_b
 
 Key functions:
 
-- `run_export`: [workflow.py](unreal_vat_bridge/workflow.py#L68)
-- `_validate_and_prepare`: [workflow.py](unreal_vat_bridge/workflow.py#L140)
-- `_create_temporary_scene`: [workflow.py](unreal_vat_bridge/workflow.py#L236)
-- `_apply_ui_values_to_gn_transfer_layer`: [workflow.py](unreal_vat_bridge/workflow.py#L480)
-- `_bake_geometry_nodes_animation_node`: [workflow.py](unreal_vat_bridge/workflow.py#L700)
-- `_apply_end_frame_export_settings`: [workflow.py](unreal_vat_bridge/workflow.py#L865)
-- `_export_rendered_textures`: [workflow.py](unreal_vat_bridge/workflow.py#L1888)
-- `_export_json_metadata`: [workflow.py](unreal_vat_bridge/workflow.py#L2889)
-- `_export_mesh_fbx`: [workflow.py](unreal_vat_bridge/workflow.py#L2945)
+- `run_export`: [workflow.py](unreal_vat_bridge/workflow.py#L396)
+- `_validate_and_prepare`: [workflow.py](unreal_vat_bridge/workflow.py#L495)
+- `_create_temporary_scene`: [workflow.py](unreal_vat_bridge/workflow.py#L550)
+- `_apply_ui_values_to_gn_transfer_layer`: [workflow.py](unreal_vat_bridge/workflow.py#L1120)
+- `_bake_geometry_nodes_animation_node`: [workflow.py](unreal_vat_bridge/workflow.py#L1405)
+- `_apply_end_frame_export_settings`: [workflow.py](unreal_vat_bridge/workflow.py#L1570)
+- `_export_rendered_textures`: [workflow.py](unreal_vat_bridge/workflow.py#L2571)
+- `_export_json_metadata`: [workflow.py](unreal_vat_bridge/workflow.py#L4206)
+- `_export_mesh_fbx`: [workflow.py](unreal_vat_bridge/workflow.py#L4271)
 
 ## Temporary Scene System
 
@@ -272,7 +272,7 @@ Important temporary objects:
 - reference object name pattern: `VAT_RefFrameOBJ`
 - RBD reference collection name pattern: `VAT_RefFrameCollection`
 
-Whether the temp scene is retained or deleted is controlled by the `Keep Temporary Scene` checkbox in the `Deb` section.
+Whether the temp scene is retained or deleted is controlled by the `Keep Temporary Scene` checkbox in the `Debug` section.
 
 ## Geometry Nodes Contract
 
@@ -332,9 +332,9 @@ The workflow reads these Geometry Nodes outputs/attributes during export:
 - `PosDefrence`
 - `UVMap`
 
-Mode-specific range attributes:
+Mode-specific range attributes (returned by `handler.position_range_attr_names()` / `handler.size_range_attr_names()`):
 
-- Vertex: `min`, `max`
+- Vertex: `min`, `max` (no size range)
 - RBD: `Pos_Min`, `Pos_Max`, `Size_Min`, `Size_Max`
 
 The code intentionally toggles `SkipGridTransfer` during different phases:
@@ -441,7 +441,7 @@ This means the FBX should represent the final Geometry Nodes export mesh, not th
 
 Relevant function:
 
-- `_export_mesh_fbx`: [workflow.py](unreal_vat_bridge/workflow.py#L2945)
+- `_export_mesh_fbx`: [workflow.py](unreal_vat_bridge/workflow.py#L4271)
 
 ## JSON Export Spec
 
@@ -556,6 +556,65 @@ RBD currently exports only the `Position` pass to disk and may not expose `WhatT
 
 FBX export now targets the helper object path, because that is the object actually carrying the final Geometry Nodes export mesh.
 
+### `allow_partial` Parameter on Direct Texel Writer
+
+`_write_display_attribute_texture_from_geometry` accepts an explicit `allow_partial=False` parameter. `_export_textures_from_realized_geometry` computes this value once via `_get_mode_handler(settings).allow_partial_coverage()` and passes it through to each call site.
+
+Rule: `allow_partial=True` only for RBD mode, where sparse texel occupancy is expected. Vertex mode must remain `allow_partial=False` so incomplete UV coverage is caught and triggers the render fallback.
+
+### ModeHandler Registry
+
+All per-mode branching logic has been consolidated into a `ModeHandler` class hierarchy in [workflow.py](unreal_vat_bridge/workflow.py). Instances are registered in a `_MODE_REGISTRY` dict keyed by mode string.
+
+```python
+_MODE_REGISTRY = {
+    EXPORT_MODE_VERTEX: _VertexModeHandler(),
+    EXPORT_MODE_RBD:    _RBDModeHandler(),
+}
+```
+
+`_get_mode_handler(settings)` looks up the active mode and returns the handler. If the mode is unknown, it raises `ExportWorkflowError`.
+
+**Adding a new mode** requires only:
+1. Subclass `ModeHandler` in `workflow.py` and override the relevant methods
+2. Call `_register_mode(YourModeHandler())` at module level
+3. Add the mode to `EXPORT_MODE_ITEMS` in `constants.py`
+4. Add mode-specific properties to `properties.py` and UI in `ui.py`
+
+`_is_rbd_mode(settings)` no longer exists. Mode detection is always via `_get_mode_handler`.
+
+### ABC Import Path for Source Objects (`use_abc_import`) — Vertex Mode Only
+
+In **Vertex mode**, `_create_temporary_scene` can duplicate source objects in two ways, selectable via the **Use ABC Import** checkbox in the Mode panel (`settings.use_abc_import`, default `True`):
+
+| Path | How |
+|---|---|
+| **ABC (default)** | Exports source objects to a temp `.abc` via `bpy.ops.wm.alembic_export`, imports into `VAT_Compute_Scene` via `bpy.ops.wm.alembic_import`. Imported objects get `MESH_SEQUENCE_CACHE` modifiers so GN evaluates them correctly per-frame. |
+| **Direct copy** | `source.copy()` + `source.data.copy()` — the legacy path. |
+
+If ABC fails, the code automatically falls back to direct copy and logs a WARNING.
+
+`_cleanup_temporary_scene` collects `CacheFile` data blocks from `MESH_SEQUENCE_CACHE` modifiers before removing objects so Alembic cache data is properly freed.
+
+`use_abc_import` is registered in `UVB_PG_settings` (properties.py). It has no effect in RBD mode.
+
+### RBD Transform Bake (Replacing ABC for RBD)
+
+RBD mode no longer uses ABC export/import. Instead, `_bake_source_transforms_to_keyframes` is called:
+
+1. Source objects are directly copied into `VAT_Compute_Scene` (mesh only, no simulation state)
+2. For each frame in `[start_frame, end_frame, step=frame_drop_step]`, the depsgraph-evaluated `matrix_world` is decomposed and inserted as keyframes (`location`, `rotation_quaternion`, `scale`) on the copy
+3. All keyframe interpolation is set to `CONSTANT` so GN reads the exact baked transform at each frame without drift
+4. No disk I/O is required
+
+This correctly captures rigid body and any other object-level animation that the depsgraph evaluates, without needing to serialize full mesh data to disk per frame. Cleanup requires no special handling: the objects carry only standard keyframe animation data, no `MESH_SEQUENCE_CACHE` or `CacheFile`.
+
+### `ShowAlpha = False` Before Normal Render in Vertex Mode
+
+In `_export_rendered_textures_via_render`, the render-fallback path for Vertex mode (`else` branch, i.e. `use_show_alph_composite = False`) now explicitly sets `ShowAlpha = False` before rendering the Normal texture (line ~2574). This is done via the shared `show_alph_identifier` / `previous_show_alph` variables, which the existing `finally` block already restores. The `allow_missing=False` call (without the flag) is used intentionally here so a missing `ShowAlpha` socket is not silently ignored in future GN group revisions.
+
+Rule: When rendering Normal in Vertex mode, `ShowAlpha` must be `False`. The alpha channel encodes RBD occupancy data; leaving it `True` would corrupt the Normal EXR with alpha-composite garbage.
+
 ## Known Sensitive Areas
 
 These areas are easy to break:
@@ -572,15 +631,14 @@ When changing any of these, test inside Blender instead of relying only on stati
 
 ### RBD Reference Data
 
-RBD no longer sends a single joined reference mesh object into Geometry Nodes.
+RBD does not use a single joined reference mesh object.
 
 Current RBD behavior:
 
-- duplicate the selected source collection into the temporary scene
-- create a second reference collection at the chosen reference frame
-- freeze each object in that reference collection at the reference frame
-- clear animation/keyframes from the frozen reference objects
-- pass that collection into the GN socket `RefFrameCollection`
+- bake depsgraph-evaluated `matrix_world` transforms as keyframes on source copies (`_bake_source_transforms_to_keyframes`)
+- create a second reference collection at the chosen reference frame (`_create_reference_frame_collection`)
+- freeze each object in that reference collection at the reference frame, clear animation/modifiers/constraints
+- pass that frozen collection into the GN socket `RefFrameCollection`
 
 Vertex mode still uses the single joined `VAT_RefFrameOBJ` path.
 

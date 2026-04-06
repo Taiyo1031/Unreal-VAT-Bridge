@@ -52,6 +52,10 @@ class UVB_PT_main(Panel):
         mode_box.prop(settings, "export_mode", text="Export Mode")
         if _is_export_mode_enum_stale(settings):
             mode_box.label(text="Export Mode enum is stale. Disable/enable addon.", icon="ERROR")
+        if hasattr(settings, "use_abc_import"):
+            mode_box.prop(settings, "use_abc_import", text="Use ABC Import")
+        else:
+            mode_box.label(text="Use ABC Import: unavailable (reload addon)")
 
         source_box = layout.box()
         source_box.label(text="Source")

@@ -16,6 +16,15 @@ class UVB_PG_settings(PropertyGroup):
         items=constants.EXPORT_MODE_ITEMS,
         default=constants.EXPORT_MODE_VERTEX,
     )
+    use_abc_import: BoolProperty(
+        name="Use ABC Import",
+        description=(
+            "Export source objects to a temporary Alembic file and re-import them into the "
+            "compute scene. Imported objects use MESH_SEQUENCE_CACHE so GN evaluates them "
+            "frame-by-frame correctly. Disable to use the legacy direct object-copy path"
+        ),
+        default=True,
+    )
     output_directory: StringProperty(
         name="Output Folder",
         description="Folder where exported textures, metadata, and meshes are written",

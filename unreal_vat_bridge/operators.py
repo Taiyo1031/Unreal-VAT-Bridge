@@ -25,6 +25,14 @@ def _tag_progress_redraw(context):
                 except Exception:
                     pass
 
+    # Force an immediate redraw so the footer status text becomes visible
+    # during blocking execute(). wm.progress_begin/end update the OS cursor
+    # directly and bypass this, but status_text_set needs a redraw flush.
+    try:
+        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+    except Exception:
+        pass
+
 
 class _FooterProgress:
     def __init__(self, context):

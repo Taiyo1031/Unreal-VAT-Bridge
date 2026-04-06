@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import array
 import glob
 import json
 import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -22,6 +24,324 @@ WHAT_TO_SHOW_MENU_INDEX = {
 
 class ExportWorkflowError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# ModeHandler — per-mode strategy objects
+# ---------------------------------------------------------------------------
+
+class ModeHandler:
+    """Abstract base for per-mode export strategies.
+
+    Subclasses override only the methods that differ from the default
+    (Vertex) behaviour so that adding a new mode means writing one class,
+    not hunting through a dozen if/else branches.
+    """
+
+    # ---- identity ---------------------------------------------------------
+
+    @property
+    def mode_id(self) -> str:  # pragma: no cover
+        raise NotImplementedError
+
+    # ---- source selection -------------------------------------------------
+
+    def resolve_source_selection(self, scene, settings):
+        """Return (source_objects, source_kind, asset_name, use_collection,
+        source_object, source_collection) for this mode."""
+        raise NotImplementedError
+
+    # ---- source duplication into compute scene ----------------------------
+
+    def copy_sources(self, context, original_scene, temp_scene, prepared, settings, reporter=None):
+        """Populate temp_scene with copies of the source objects and return
+        (source_copy_objects, source_object_for_gn, source_collection_for_gn)."""
+        raise NotImplementedError
+
+    # ---- reference frame --------------------------------------------------
+
+    def create_reference_frame(self, context, temp_scene, source_copy_objects,
+                                reference_frame, uv_map_index, selected_uv_name, reporter=None):
+        """Return (reference_object, reference_collection)."""
+        raise NotImplementedError
+
+    # ---- GN socket wiring -------------------------------------------------
+
+    def use_collection_required(self) -> bool:
+        """True → wire UseCollection as a required socket; False → optional."""
+        return True
+
+    def wire_reference_frame_sockets(self, gn_modifier, resolved, temp_state, set_required, report):
+        """Wire the Ref Frame Object / Ref Frame Collection socket(s)."""
+        raise NotImplementedError
+
+    def wire_extra_sockets(self, prepared, gn_modifier, settings, report):
+        """Wire any mode-specific extra sockets (e.g. SkipScale, ShowAlph)."""
+        pass
+
+    def wire_what_to_show(self, prepared, gn_modifier, report):
+        """Wire the WhatToShow socket if needed."""
+        pass
+
+    # ---- texture / render -------------------------------------------------
+
+    def exports_normal_texture(self) -> bool:
+        return True
+
+    def uses_show_alph_composite(self) -> bool:
+        return False
+
+    def allow_partial_coverage(self) -> bool:
+        """allow_partial flag for _read_display_attribute_pixels_via_realized_instances_probe."""
+        return False
+
+    # ---- attributes / JSON ------------------------------------------------
+
+    def position_range_attr_names(self) -> tuple:
+        return ("min", "max")
+
+    def size_range_attr_names(self) -> tuple:
+        return ()
+
+    def extra_json_fields(self, settings, end_frame_attrs, size_attr_names) -> dict:
+        return {}
+
+    # ---- FBX export -------------------------------------------------------
+
+    def create_fbx_export_object(self, context, prepared, temp_state, settings, scene, view_layer, eval_frame, report):
+        """Create and return the export_object for FBX export."""
+        raise NotImplementedError
+
+    # ---- misc -------------------------------------------------------------
+
+    def texture_export_log_message(self) -> str:
+        return "Exporting Position/Normal textures..."
+
+    def vat_mode_index(self) -> int:
+        return 0
+
+
+# ---- Vertex mode ----------------------------------------------------------
+
+class _VertexModeHandler(ModeHandler):
+    mode_id = constants.EXPORT_MODE_VERTEX
+
+    def resolve_source_selection(self, scene, settings):
+        use_collection = bool(getattr(settings, "vertex_use_collection", False))
+        if use_collection:
+            collection = getattr(settings, "vertex_source_collection", None)
+            if collection is None:
+                raise ExportWorkflowError("Source Collection is required when Use Collection is enabled.")
+            source_objects = [
+                obj for obj in collection.objects
+                if obj.name in scene.objects and obj.type == "MESH"
+            ]
+            if not source_objects:
+                raise ExportWorkflowError("Source Collection must contain mesh objects in the active scene.")
+            return source_objects, "COLLECTION", collection.name, True, None, collection
+
+        obj = getattr(settings, "vertex_source_object", None)
+        if obj is None:
+            raise ExportWorkflowError("Source Object is required in Vertex mode.")
+        if obj.type != "MESH":
+            raise ExportWorkflowError("Source Object must be a mesh in Vertex mode.")
+        if obj.name not in scene.objects:
+            raise ExportWorkflowError("Vertex Source Object must exist in the active scene.")
+        return [obj], "OBJECT", obj.name, False, obj, None
+
+    def copy_sources(self, context, original_scene, temp_scene, prepared, settings, reporter=None):
+        report = reporter if reporter else (lambda _l, _m: None)
+        if _get_use_abc_import(settings):
+            objects_before_abc = set(temp_scene.objects)
+            try:
+                return _duplicate_sources_via_abc(
+                    context, original_scene, temp_scene, prepared, settings, reporter=report
+                )
+            except Exception as exc:
+                report({"WARNING"}, f"ABC source import failed ({exc}); falling back to direct object copy.")
+                for obj in list(temp_scene.objects):
+                    if obj not in objects_before_abc:
+                        try:
+                            bpy.data.objects.remove(obj, do_unlink=True)
+                        except Exception:
+                            pass
+        return _duplicate_sources_into_compute_scene(temp_scene, prepared)
+
+    def create_reference_frame(self, context, temp_scene, source_copy_objects,
+                                reference_frame, uv_map_index, selected_uv_name, reporter=None):
+        report = reporter if reporter else (lambda _l, _m: None)
+        report({"INFO"}, "Creating static reference-frame mesh object...")
+        reference_object = _create_reference_frame_object(
+            context, temp_scene, source_copy_objects, reference_frame
+        )
+        _ensure_mesh_object_uv_layer(reference_object, uv_map_index, selected_uv_name)
+        return reference_object, None
+
+    def use_collection_required(self):
+        return True
+
+    def wire_reference_frame_sockets(self, gn_modifier, resolved, temp_state, set_required, report):
+        set_required(
+            "Ref Frame Object",
+            ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
+            temp_state.reference_object,
+        )
+
+    def wire_what_to_show(self, prepared, gn_modifier, report):
+        _set_what_to_show_mode(
+            prepared.node_group,
+            gn_modifier,
+            WHAT_TO_SHOW_POSITION,
+            reporter=report,
+            allow_missing=True,
+        )
+
+    def create_fbx_export_object(self, context, prepared, temp_state, settings, scene, view_layer, eval_frame, report):
+        export_object = temp_state.helper_object.copy()
+        if temp_state.helper_object.data is not None:
+            export_object.data = temp_state.helper_object.data.copy()
+        export_object.animation_data_clear()
+        scene.collection.objects.link(export_object)
+        export_modifier = _find_nodes_modifier(export_object, constants.TEMP_GN_MODIFIER_NAME)
+        if export_modifier is None:
+            raise ExportWorkflowError("Geometry Nodes modifier was not found on VAT_HelperPlane for FBX export.")
+        _set_skip_grid_transfer(prepared.node_group, export_modifier, False, report)
+        _set_uv_name_input(prepared.node_group, export_modifier, temp_state.selected_uv_name, reporter=report)
+        _set_show_export_mesh(prepared.node_group, export_modifier, True, reporter=report)
+        scene.frame_set(eval_frame)
+        for modifier in list(export_object.modifiers):
+            _select_only_object_in_scene(context, scene, view_layer, export_object)
+            with context.temp_override(
+                scene=scene,
+                view_layer=view_layer,
+                active_object=export_object,
+                object=export_object,
+                selected_objects=[export_object],
+                selected_editable_objects=[export_object],
+            ):
+                result = bpy.ops.object.modifier_apply(modifier=modifier.name)
+            if "FINISHED" not in result:
+                raise ExportWorkflowError(
+                    f"Failed to apply modifier '{modifier.name}' on VAT_HelperPlane for FBX export."
+                )
+        return export_object
+
+
+# ---- RBD mode -------------------------------------------------------------
+
+class _RBDModeHandler(ModeHandler):
+    mode_id = constants.EXPORT_MODE_RBD
+
+    def resolve_source_selection(self, scene, settings):
+        collection = _get_rbd_source_collection(settings)
+        if collection is None:
+            raise ExportWorkflowError("Source Collection is required in RBD mode.")
+        source_objects = [obj for obj in collection.objects if obj.name in scene.objects]
+        if not source_objects:
+            raise ExportWorkflowError("Source Collection has no objects in the active scene.")
+        return source_objects, "COLLECTION", collection.name, True, None, collection
+
+    def copy_sources(self, context, original_scene, temp_scene, prepared, settings, reporter=None):
+        return _bake_source_transforms_to_keyframes(
+            context, original_scene, temp_scene, prepared, settings, reporter=reporter
+        )
+
+    def create_reference_frame(self, context, temp_scene, source_copy_objects,
+                                reference_frame, uv_map_index, selected_uv_name, reporter=None):
+        report = reporter if reporter else (lambda _l, _m: None)
+        report({"INFO"}, "Creating static reference-frame collection...")
+        reference_collection = _create_reference_frame_collection(
+            context, temp_scene, source_copy_objects, reference_frame
+        )
+        _ensure_uv_layer_on_mesh_objects_in_collection(reference_collection, uv_map_index, selected_uv_name)
+        return None, reference_collection
+
+    def use_collection_required(self):
+        return False
+
+    def wire_reference_frame_sockets(self, gn_modifier, resolved, temp_state, set_required, report):
+        set_required(
+            "Ref Frame Collection",
+            ("RefFrameCollection", "Ref Frame Collection", "ReferenceCollection", "Reference Collection"),
+            temp_state.reference_collection,
+        )
+        ref_object_identifier = _find_socket_identifier(
+            resolved,
+            ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
+        )
+        if ref_object_identifier:
+            try:
+                gn_modifier[ref_object_identifier] = None
+            except Exception:
+                report({"WARNING"}, "Could not clear Ref Frame Object socket in RBD mode.")
+
+    def wire_extra_sockets(self, prepared, gn_modifier, settings, report):
+        _set_skip_scale(prepared.node_group, gn_modifier, _get_rbd_skip_scale(settings), reporter=report)
+        _set_show_alph(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
+
+    def exports_normal_texture(self):
+        return False
+
+    def uses_show_alph_composite(self):
+        return True
+
+    def allow_partial_coverage(self):
+        return True
+
+    def position_range_attr_names(self):
+        return ("Pos_Min", "Pos_Max")
+
+    def size_range_attr_names(self):
+        return ("Size_Min", "Size_Max")
+
+    def extra_json_fields(self, settings, end_frame_attrs, size_attr_names):
+        fields = {"Vat_SkipScale": bool(_get_rbd_skip_scale(settings))}
+        if size_attr_names:
+            size_min_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[0]))
+            size_max_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[1]))
+            if size_min_value is None or size_max_value is None:
+                raise ExportWorkflowError(
+                    f"Geometry Nodes attributes '{size_attr_names[0]}' and '{size_attr_names[1]}' "
+                    "are required for RBD JSON export."
+                )
+            fields["Vat_SizeRangeMin"] = _json_vector3(size_min_value)
+            fields["Vat_SizeRangeMax"] = _json_vector3(size_max_value)
+        return fields
+
+    def create_fbx_export_object(self, context, prepared, temp_state, settings, scene, view_layer, eval_frame, report):
+        report({"INFO"}, "Creating FBX export mesh from VAT_HelperPlane with ShowExportMesh enabled...")
+        export_object = _create_evaluated_export_mesh_snapshot(
+            context, scene, temp_state.helper_object
+        )
+        export_object.animation_data_clear()
+        return export_object
+
+    def texture_export_log_message(self):
+        return "Exporting RBD position texture..."
+
+    def vat_mode_index(self):
+        return 1
+
+
+# ---- registry -------------------------------------------------------------
+
+_MODE_REGISTRY: dict[str, ModeHandler] = {}
+
+
+def _register_mode(handler: ModeHandler):
+    _MODE_REGISTRY[handler.mode_id] = handler
+
+
+_register_mode(_VertexModeHandler())
+_register_mode(_RBDModeHandler())
+
+
+def _get_mode_handler(settings) -> ModeHandler:
+    mode = _get_export_mode(settings)
+    handler = _MODE_REGISTRY.get(mode)
+    if handler is None:
+        raise ExportWorkflowError(f"Unsupported export mode: {mode!r}")
+    return handler
 
 
 @dataclass
@@ -117,10 +437,7 @@ def run_export(context, settings, reporter=None, progress_callback=None):
         )
 
         _report_progress(progress_callback, 76, "Exporting textures")
-        if _is_rbd_mode(settings):
-            report({"INFO"}, "Exporting RBD position texture...")
-        else:
-            report({"INFO"}, "Exporting Position/Normal textures...")
+        report({"INFO"}, _get_mode_handler(settings).texture_export_log_message())
         position_texture, normal_texture = _export_rendered_textures(context, prepared, temp_state, settings, report)
 
         json_path = None
@@ -228,42 +545,12 @@ def _validate_and_prepare(context, settings, reporter=None):
 
 
 def _resolve_source_selection(scene, settings):
-    if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
-        use_collection = bool(getattr(settings, "vertex_use_collection", False))
-        if use_collection:
-            collection = getattr(settings, "vertex_source_collection", None)
-            if collection is None:
-                raise ExportWorkflowError("Source Collection is required when Use Collection is enabled.")
-
-            source_objects = [
-                obj for obj in collection.objects
-                if obj.name in scene.objects and obj.type == "MESH"
-            ]
-            if not source_objects:
-                raise ExportWorkflowError("Source Collection must contain mesh objects in the active scene.")
-
-            return source_objects, "COLLECTION", collection.name, True, None, collection
-
-        obj = getattr(settings, "vertex_source_object", None)
-        if obj is None:
-            raise ExportWorkflowError("Source Object is required in Vertex mode.")
-        if obj.type != "MESH":
-            raise ExportWorkflowError("Source Object must be a mesh in Vertex mode.")
-        if obj.name not in scene.objects:
-            raise ExportWorkflowError("Vertex Source Object must exist in the active scene.")
-        return [obj], "OBJECT", obj.name, False, obj, None
-
-    collection = _get_rbd_source_collection(settings)
-    if collection is None:
-        raise ExportWorkflowError("Source Collection is required in RBD mode.")
-    source_objects = [obj for obj in collection.objects if obj.name in scene.objects]
-    if not source_objects:
-        raise ExportWorkflowError("Source Collection has no objects in the active scene.")
-    return source_objects, "COLLECTION", collection.name, True, None, collection
+    return _get_mode_handler(settings).resolve_source_selection(scene, settings)
 
 
 def _create_temporary_scene(context, prepared, settings, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
+    original_scene = context.scene
     uv_map_index = _get_uv_map_index(settings)
 
     scene_name = constants.TEMP_SCENE_BASENAME
@@ -280,9 +567,9 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
     temp_scene.collection.objects.link(camera_object)
     temp_scene.camera = camera_object
 
-    source_copy_objects, source_object_for_gn, source_collection_for_gn = _duplicate_sources_into_compute_scene(
-        temp_scene,
-        prepared,
+    handler = _get_mode_handler(settings)
+    source_copy_objects, source_object_for_gn, source_collection_for_gn = handler.copy_sources(
+        context, original_scene, temp_scene, prepared, settings, reporter=report
     )
     selected_uv_name = _prepare_temp_source_uv_layers(
         source_copy_objects,
@@ -290,26 +577,10 @@ def _create_temporary_scene(context, prepared, settings, reporter=None):
         reporter=report,
     )
 
-    reference_object = None
-    reference_collection = None
-    if _is_rbd_mode(settings):
-        report({"INFO"}, "Creating static reference-frame collection...")
-        reference_collection = _create_reference_frame_collection(
-            context,
-            temp_scene,
-            source_copy_objects,
-            int(settings.reference_frame),
-        )
-        _ensure_uv_layer_on_mesh_objects_in_collection(reference_collection, uv_map_index, selected_uv_name)
-    else:
-        report({"INFO"}, "Creating static reference-frame mesh object...")
-        reference_object = _create_reference_frame_object(
-            context,
-            temp_scene,
-            source_copy_objects,
-            int(settings.reference_frame),
-        )
-        _ensure_mesh_object_uv_layer(reference_object, uv_map_index, selected_uv_name)
+    reference_object, reference_collection = handler.create_reference_frame(
+        context, temp_scene, source_copy_objects,
+        int(settings.reference_frame), uv_map_index, selected_uv_name, reporter=report,
+    )
 
     helper_mesh = bpy.data.meshes.new(f"{scene_name}_HelperPlaneMesh")
     helper_mesh.from_pydata(
@@ -365,6 +636,171 @@ def _duplicate_sources_into_compute_scene(temp_scene, prepared):
     if not prepared.use_collection and source_object_for_gn is None:
         source_object_for_gn = source_copy_objects[0]
 
+    if prepared.use_collection:
+        collection_name = _unique_name("VAT_SourceCollection", bpy.data.collections.keys())
+        source_collection_for_gn = bpy.data.collections.new(collection_name)
+        temp_scene.collection.children.link(source_collection_for_gn)
+        for obj_copy in source_copy_objects:
+            source_collection_for_gn.objects.link(obj_copy)
+
+    return source_copy_objects, source_object_for_gn, source_collection_for_gn
+
+
+def _get_use_abc_import(settings):
+    return bool(getattr(settings, "use_abc_import", True))
+
+
+def _abc_export_sources(context, original_scene, prepared, settings, abc_path, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
+    if not hasattr(bpy.ops.wm, "alembic_export"):
+        raise ExportWorkflowError("Alembic export is not available in this Blender build.")
+    view_layer = original_scene.view_layers[0]
+    source_list = list(prepared.source_objects)
+    if not source_list:
+        raise ExportWorkflowError("No source objects to export to Alembic.")
+    with context.temp_override(
+        scene=original_scene,
+        view_layer=view_layer,
+        active_object=source_list[0],
+        object=source_list[0],
+        selected_objects=source_list,
+        selected_editable_objects=source_list,
+    ):
+        frame_step = max(1, int(getattr(settings, "frame_drop_step", 1)))
+        result = bpy.ops.wm.alembic_export(
+            filepath=abc_path,
+            selected=True,
+            start=int(settings.start_frame),
+            end=int(settings.end_frame),
+            step=float(frame_step),
+            uvs=True,
+            normals=True,
+            as_background_job=False,
+        )
+    if "FINISHED" not in result:
+        raise ExportWorkflowError(f"Alembic export operator returned {result}.")
+    report({"INFO"}, f"ABC export: {len(source_list)} object(s) → {abc_path}")
+
+
+def _abc_import_sources(context, temp_scene, prepared, abc_path, reporter=None):
+    report = reporter if reporter else (lambda _level, _message: None)
+    if not hasattr(bpy.ops.wm, "alembic_import"):
+        raise ExportWorkflowError("Alembic import is not available in this Blender build.")
+    view_layer = temp_scene.view_layers[0]
+    objects_before = set(temp_scene.objects)
+    with context.temp_override(scene=temp_scene, view_layer=view_layer):
+        result = bpy.ops.wm.alembic_import(
+            filepath=abc_path,
+            as_background_job=False,
+            set_frame_range=False,
+            validate_meshes=False,
+        )
+    if "FINISHED" not in result:
+        raise ExportWorkflowError(f"Alembic import operator returned {result}.")
+    new_mesh_objects = [
+        obj for obj in temp_scene.objects
+        if obj not in objects_before and obj.type == "MESH"
+    ]
+    if not new_mesh_objects:
+        raise ExportWorkflowError("Alembic import produced no mesh objects in the compute scene.")
+    report({"INFO"}, f"ABC import: {len(new_mesh_objects)} mesh object(s) loaded.")
+    source_copy_objects = new_mesh_objects
+    source_object_for_gn = None
+    source_collection_for_gn = None
+    if prepared.use_collection:
+        collection_name = _unique_name("VAT_SourceCollection", bpy.data.collections.keys())
+        source_collection_for_gn = bpy.data.collections.new(collection_name)
+        temp_scene.collection.children.link(source_collection_for_gn)
+        for obj in source_copy_objects:
+            source_collection_for_gn.objects.link(obj)
+    else:
+        if prepared.source_object:
+            source_name = prepared.source_object.name
+            for obj in source_copy_objects:
+                if obj.name == source_name or obj.name.startswith(source_name):
+                    source_object_for_gn = obj
+                    break
+        if source_object_for_gn is None:
+            source_object_for_gn = source_copy_objects[0]
+    return source_copy_objects, source_object_for_gn, source_collection_for_gn
+
+
+def _duplicate_sources_via_abc(context, original_scene, temp_scene, prepared, settings, reporter=None):
+    """Export source objects to a temporary .abc, import into temp_scene.
+    Imported objects carry MESH_SEQUENCE_CACHE and animate correctly when GN evaluates per-frame.
+    Raises ExportWorkflowError on failure so the caller can fall back to direct copy.
+    """
+    report = reporter if reporter else (lambda _level, _message: None)
+    abc_fd, abc_path = tempfile.mkstemp(suffix=".abc", prefix="vat_src_")
+    os.close(abc_fd)
+    try:
+        _abc_export_sources(context, original_scene, prepared, settings, abc_path, reporter=report)
+        return _abc_import_sources(context, temp_scene, prepared, abc_path, reporter=report)
+    finally:
+        try:
+            os.remove(abc_path)
+        except Exception:
+            pass
+
+
+def _bake_source_transforms_to_keyframes(context, original_scene, temp_scene, prepared, settings, reporter=None):
+    """Copy source objects into temp_scene and bake their evaluated world transforms as keyframes.
+    Captures rigid body physics without disk I/O. Intended for RBD mode only.
+    """
+    report = reporter if reporter else (lambda _level, _message: None)
+
+    source_copy_objects = []
+    for source in prepared.source_objects:
+        obj_copy = source.copy()
+        if source.data is not None:
+            obj_copy.data = source.data.copy()
+        obj_copy.animation_data_clear()
+        obj_copy.matrix_world = source.matrix_world.copy()
+        temp_scene.collection.objects.link(obj_copy)
+        source_copy_objects.append(obj_copy)
+
+    if not source_copy_objects:
+        raise ExportWorkflowError("No source objects were copied for transform bake.")
+
+    start = int(settings.start_frame)
+    end = int(settings.end_frame)
+    step = max(1, int(getattr(settings, "frame_drop_step", 1)))
+    previous_frame = original_scene.frame_current
+    try:
+        for frame in range(start, end + 1, step):
+            original_scene.frame_set(frame)
+            depsgraph = context.evaluated_depsgraph_get()
+            for source, obj_copy in zip(prepared.source_objects, source_copy_objects):
+                eval_obj = source.evaluated_get(depsgraph)
+                loc, rot, scale = eval_obj.matrix_world.decompose()
+                obj_copy.rotation_mode = "QUATERNION"
+                obj_copy.location = loc
+                obj_copy.rotation_quaternion = rot
+                obj_copy.scale = scale
+                obj_copy.keyframe_insert("location", frame=frame)
+                obj_copy.keyframe_insert("rotation_quaternion", frame=frame)
+                obj_copy.keyframe_insert("scale", frame=frame)
+    finally:
+        original_scene.frame_set(previous_frame)
+
+    for obj_copy in source_copy_objects:
+        if obj_copy.animation_data and obj_copy.animation_data.action:
+            for fcurve in obj_copy.animation_data.action.fcurves:
+                for kp in fcurve.keyframe_points:
+                    kp.interpolation = "CONSTANT"
+
+    report({"INFO"}, f"Transform bake: {len(source_copy_objects)} object(s), frames {start}–{end} step {step}.")
+
+    source_object_for_gn = None
+    if prepared.source_object:
+        for obj_copy in source_copy_objects:
+            if obj_copy.name.startswith(prepared.source_object.name):
+                source_object_for_gn = obj_copy
+                break
+    if not prepared.use_collection and source_object_for_gn is None:
+        source_object_for_gn = source_copy_objects[0]
+
+    source_collection_for_gn = None
     if prepared.use_collection:
         collection_name = _unique_name("VAT_SourceCollection", bpy.data.collections.keys())
         source_collection_for_gn = bpy.data.collections.new(collection_name)
@@ -454,9 +890,6 @@ def _get_export_mode(settings):
     return mode
 
 
-def _is_rbd_mode(settings):
-    return _get_export_mode(settings) == getattr(constants, "EXPORT_MODE_RBD", "RBD")
-
 
 def _get_node_group_name_for_mode(settings):
     export_mode = _get_export_mode(settings)
@@ -482,10 +915,7 @@ def _get_rbd_skip_scale(settings):
 
 
 def _get_vat_mode_index(settings):
-    mode = _get_export_mode(settings)
-    if mode == getattr(constants, "EXPORT_MODE_RBD", "RBD"):
-        return 1
-    return 0
+    return _get_mode_handler(settings).vat_mode_index()
 
 
 def _json_vector3(value):
@@ -523,19 +953,15 @@ def _json_texture_size_value(width, height):
 
 
 def _get_position_range_attribute_names(settings):
-    if _is_rbd_mode(settings):
-        return ("Pos_Min", "Pos_Max")
-    return ("min", "max")
+    return _get_mode_handler(settings).position_range_attr_names()
 
 
 def _get_size_range_attribute_names(settings):
-    if _is_rbd_mode(settings):
-        return ("Size_Min", "Size_Max")
-    return ()
+    return _get_mode_handler(settings).size_range_attr_names()
 
 
 def _exports_normal_texture(settings):
-    return not _is_rbd_mode(settings)
+    return _get_mode_handler(settings).exports_normal_texture()
 
 
 def _attribute_lookup_key(name):
@@ -543,7 +969,7 @@ def _attribute_lookup_key(name):
 
 
 def _uses_show_alph_composite(settings):
-    return _is_rbd_mode(settings)
+    return _get_mode_handler(settings).uses_show_alph_composite()
 
 
 def _create_reference_frame_object(context, temp_scene, source_copy_objects, reference_frame):
@@ -738,10 +1164,12 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
                 f"Failed to assign '{label}' to Geometry Nodes input '{identifier}': {exc}"
             ) from exc
 
+    handler = _get_mode_handler(settings)
+
     set_required("Start Frame", ("StartFrame", "Start Frame"), int(settings.start_frame))
     set_required("End Frame", ("EndFrame", "End Frame"), int(settings.end_frame))
     set_required("Reference Frame", ("ReferenceFrame", "Reference Frame"), int(settings.reference_frame))
-    if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
+    if handler.use_collection_required():
         set_required("Use Collection", ("UseCollection", "Use Collection"), bool(prepared.use_collection))
     else:
         use_collection_identifier = _find_socket_identifier(resolved, ("UseCollection", "Use Collection"))
@@ -758,31 +1186,9 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
         ("FrameDropStep", "Frame Drop Step", "FPSDropping", "FPS Dropping"),
         int(prepared.frame_drop_step),
     )
-    if _is_rbd_mode(settings):
-        set_required(
-            "Ref Frame Collection",
-            ("RefFrameCollection", "Ref Frame Collection", "ReferenceCollection", "Reference Collection"),
-            temp_state.reference_collection,
-        )
-        ref_object_identifier = _find_socket_identifier(
-            resolved,
-            ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
-        )
-        if ref_object_identifier:
-            try:
-                gn_modifier[ref_object_identifier] = None
-            except Exception:
-                report({"WARNING"}, "Could not clear Ref Frame Object socket in RBD mode.")
-    else:
-        set_required(
-            "Ref Frame Object",
-            ("RefFrameOBJ", "Ref Frame OBJ", "ReferenceObject", "Reference Object", "RefObject", "Ref Object"),
-            temp_state.reference_object,
-        )
+    handler.wire_reference_frame_sockets(gn_modifier, resolved, temp_state, set_required, report)
     set_required("UV Name", ("UVName", "UV Name"), str(temp_state.selected_uv_name))
-    if _is_rbd_mode(settings):
-        _set_skip_scale(prepared.node_group, gn_modifier, _get_rbd_skip_scale(settings), reporter=report)
-        _set_show_alph(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
+    handler.wire_extra_sockets(prepared, gn_modifier, settings, report)
 
     if prepared.use_collection:
         set_required(
@@ -814,14 +1220,7 @@ def _apply_ui_values_to_gn_transfer_layer(temp_state, prepared, settings, report
 
     _set_skip_grid_transfer(prepared.node_group, gn_modifier, False, report)
     _set_show_export_mesh(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
-    if not _is_rbd_mode(settings):
-        _set_what_to_show_mode(
-            prepared.node_group,
-            gn_modifier,
-            WHAT_TO_SHOW_POSITION,
-            reporter=report,
-            allow_missing=True,
-        )
+    handler.wire_what_to_show(prepared, gn_modifier, report)
 
     if required_missing:
         missing_text = ", ".join(required_missing)
@@ -2210,6 +2609,7 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
     show_alph_identifier = None
     previous_show_alph = None
     use_show_alph_composite = _uses_show_alph_composite(settings)
+    allow_partial = _get_mode_handler(settings).allow_partial_coverage()
 
     try:
         if context.window:
@@ -2255,7 +2655,7 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
                 int(prepared.export_texture_height),
                 attribute_name="DisplayAttribute",
                 uv_layer_name=temp_state.selected_uv_name,
-                allow_partial=_is_rbd_mode(settings),
+                allow_partial=allow_partial,
                 reporter=report,
             )
 
@@ -2270,7 +2670,7 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
                 int(prepared.export_texture_height),
                 attribute_name="DisplayAttribute",
                 uv_layer_name=temp_state.selected_uv_name,
-                allow_partial=_is_rbd_mode(settings),
+                allow_partial=allow_partial,
                 reporter=report,
             )
 
@@ -2291,6 +2691,7 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
                 position_path,
                 eval_frame,
                 WHAT_TO_SHOW_POSITION if requires_what_to_show else None,
+                allow_partial=allow_partial,
                 reporter=report,
             )
         if normal_path:
@@ -2302,6 +2703,7 @@ def _export_textures_from_realized_geometry(context, prepared, temp_state, setti
                 normal_path,
                 eval_frame,
                 WHAT_TO_SHOW_NORMAL,
+                allow_partial=allow_partial,
                 reporter=report,
             )
 
@@ -2561,6 +2963,15 @@ def _export_rendered_textures_via_render(context, prepared, temp_state, settings
                 reporter=report,
             )
             if normal_path:
+                if show_alph_identifier is None:
+                    show_alph_identifier = _find_show_alph_identifier(prepared.node_group)
+                if show_alph_identifier:
+                    previous_show_alph = _read_modifier_input_value(
+                        temp_state.gn_modifier,
+                        prepared.node_group,
+                        show_alph_identifier,
+                    )
+                    _set_show_alph(prepared.node_group, temp_state.gn_modifier, False, reporter=report)
                 generated_normal = _render_display_attribute_texture(
                     context,
                     scene,
@@ -2669,6 +3080,7 @@ def _write_display_attribute_texture_from_geometry(
     output_path,
     evaluate_frame,
     what_to_show_mode,
+    allow_partial=False,
     reporter=None,
 ):
     report = reporter if reporter else (lambda _level, _message: None)
@@ -2689,7 +3101,7 @@ def _write_display_attribute_texture_from_geometry(
         int(prepared.export_texture_height),
         attribute_name="DisplayAttribute",
         uv_layer_name=temp_state.selected_uv_name,
-        allow_partial=_is_rbd_mode(settings),
+        allow_partial=allow_partial,
         reporter=report,
     )
     _save_float_exr_image(scene, output_path, int(prepared.export_texture_width), int(prepared.export_texture_height), pixels)
@@ -2901,8 +3313,11 @@ def _rasterize_realized_attribute_mesh_with_locator(
     attribute,
     pixel_locator,
 ):
-    pixels = [0.0] * (texture_width * texture_height * 4)
-    write_counts = [0] * (texture_width * texture_height)
+    # Use array.array('f') instead of a Python list: stores floats as packed
+    # 4-byte C floats (4 bytes each) rather than boxed Python float objects
+    # (~24 bytes each), reducing memory usage by ~8x for large textures.
+    pixels = array.array('f', bytes(texture_width * texture_height * 4 * 4))
+    write_counts = array.array('I', bytes(texture_width * texture_height * 4))
     mapped_polygons = 0
 
     for poly in mesh.polygons:
@@ -2917,7 +3332,10 @@ def _rasterize_realized_attribute_mesh_with_locator(
         base = pixel_index * 4
         previous_count = write_counts[pixel_index]
         if previous_count == 0:
-            pixels[base:base + 4] = rgba
+            pixels[base] = rgba[0]
+            pixels[base + 1] = rgba[1]
+            pixels[base + 2] = rgba[2]
+            pixels[base + 3] = rgba[3]
         else:
             total = float(previous_count + 1)
             for channel_index, value in enumerate(rgba):
@@ -2996,6 +3414,7 @@ def _rasterize_realized_attribute_mesh(
     best_pixels = None
     best_missing = None
     best_label = None
+    best_stats = None
     attempt_summaries = []
 
     for label, locator in attempts:
@@ -3011,12 +3430,14 @@ def _rasterize_realized_attribute_mesh(
         attempt_summaries.append(attempt_text)
         report({"INFO"}, f"Direct texel mapping attempt: {attempt_text}")
         if best_missing is None or missing_count < best_missing:
-            best_pixels = pixels
+            best_pixels = pixels  # release previous best before next attempt allocates
             best_missing = missing_count
             best_label = label
             best_stats = stats
+        else:
+            del pixels  # this attempt was worse; free the buffer immediately
         if missing_count == 0:
-            return pixels
+            return best_pixels
 
     if allow_partial and best_pixels is not None:
         report(
@@ -3098,7 +3519,7 @@ def _compose_rgb_and_alpha_pixels(color_pixels, alpha_pixels):
     if len(color_pixels) % 4 != 0:
         raise ExportWorkflowError("Pixel buffers must contain RGBA tuples.")
 
-    combined = list(color_pixels)
+    combined = array.array('f', color_pixels)
     for base in range(0, len(combined), 4):
         alpha_value = max(
             float(alpha_pixels[base + 0]),
@@ -3133,7 +3554,7 @@ def _copy_image_pixels(image, source_label):
         )
 
     expected = width * height * 4
-    pixels = [0.0] * expected
+    pixels = array.array('f', bytes(expected * 4))
     try:
         image.pixels.foreach_get(pixels)
     except Exception as exc:
@@ -3843,16 +4264,8 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         "Vat_PositionRangeMax": _json_vector3(max_value),
     }
 
-    if _is_rbd_mode(settings) and size_attr_names:
-        payload["Vat_SkipScale"] = bool(_get_rbd_skip_scale(settings))
-        size_min_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[0]))
-        size_max_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[1]))
-        if size_min_value is None or size_max_value is None:
-            raise ExportWorkflowError(
-                f"Geometry Nodes attributes '{size_attr_names[0]}' and '{size_attr_names[1]}' are required for RBD JSON export."
-            )
-        payload["Vat_SizeRangeMin"] = _json_vector3(size_min_value)
-        payload["Vat_SizeRangeMax"] = _json_vector3(size_max_value)
+    extra = _get_mode_handler(settings).extra_json_fields(settings, end_frame_attrs, size_attr_names)
+    payload.update(extra)
 
     json_text = json.dumps(payload, indent=2)
     with open(json_path, "w", encoding="utf-8") as handle:
@@ -3934,50 +4347,11 @@ def _export_mesh_fbx(context, prepared, temp_state, settings, reporter=None):
         _set_uv_name_input(prepared.node_group, temp_state.gn_modifier, temp_state.selected_uv_name, reporter=report)
         _set_show_export_mesh(prepared.node_group, temp_state.gn_modifier, True, reporter=report)
         scene.frame_set(eval_frame)
-        if _is_rbd_mode(settings):
-            report({"INFO"}, "Creating FBX export mesh from VAT_HelperPlane with ShowExportMesh enabled...")
-            export_object = _create_evaluated_export_mesh_snapshot(
-                context,
-                scene,
-                temp_state.helper_object,
-            )
-            export_object.animation_data_clear()
-            renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
-            export_object.name = prepared.asset_name
-        else:
-            export_object = temp_state.helper_object.copy()
-            if temp_state.helper_object.data is not None:
-                export_object.data = temp_state.helper_object.data.copy()
-            export_object.animation_data_clear()
-            scene.collection.objects.link(export_object)
-
-            renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
-            export_object.name = prepared.asset_name
-
-            export_modifier = _find_nodes_modifier(export_object, constants.TEMP_GN_MODIFIER_NAME)
-            if export_modifier is None:
-                raise ExportWorkflowError("Geometry Nodes modifier was not found on VAT_HelperPlane for FBX export.")
-
-            _set_skip_grid_transfer(prepared.node_group, export_modifier, False, report)
-            _set_uv_name_input(prepared.node_group, export_modifier, temp_state.selected_uv_name, reporter=report)
-            _set_show_export_mesh(prepared.node_group, export_modifier, True, reporter=report)
-            scene.frame_set(eval_frame)
-
-            for modifier in list(export_object.modifiers):
-                _select_only_object_in_scene(context, scene, view_layer, export_object)
-                with context.temp_override(
-                    scene=scene,
-                    view_layer=view_layer,
-                    active_object=export_object,
-                    object=export_object,
-                    selected_objects=[export_object],
-                    selected_editable_objects=[export_object],
-                ):
-                    result = bpy.ops.object.modifier_apply(modifier=modifier.name)
-                if "FINISHED" not in result:
-                    raise ExportWorkflowError(
-                        f"Failed to apply modifier '{modifier.name}' on VAT_HelperPlane for FBX export."
-                    )
+        export_object = _get_mode_handler(settings).create_fbx_export_object(
+            context, prepared, temp_state, settings, scene, view_layer, eval_frame, report
+        )
+        renamed_conflicts = _reserve_exact_object_name(prepared.asset_name, exclude_object=export_object)
+        export_object.name = prepared.asset_name
 
         _ensure_export_mesh_uv_layer(export_object, temp_state.selected_uv_name, _get_uv_map_index(settings))
 
@@ -4356,10 +4730,18 @@ def _cleanup_temporary_scene(temp_state):
 
     temp_objects = list(temp_scene.objects)
     temp_object_data = [getattr(obj, "data", None) for obj in temp_objects if getattr(obj, "data", None) is not None]
+    abc_cache_files = []
+    for obj in temp_objects:
+        for modifier in getattr(obj, "modifiers", []):
+            if getattr(modifier, "type", "") == "MESH_SEQUENCE_CACHE":
+                cf = getattr(modifier, "cache_file", None)
+                if cf is not None:
+                    abc_cache_files.append(cf)
     runtime_node_group = getattr(getattr(temp_state, "gn_modifier", None), "node_group", None)
     cleanup_candidates = [
         runtime_node_group,
         *temp_object_data,
+        *abc_cache_files,
     ]
 
     removed_objects = 0
