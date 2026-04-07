@@ -70,7 +70,8 @@ The main panel currently renders these sections in order:
 3. `Source`
 4. `Animation`
 5. `Output`
-6. `Export`
+6. `Export Settings` (both modes — inline box section, always visible and always expanded)
+7. `Export`
 
 Below the main sections, the panel exposes collapsible child panels:
 
@@ -112,23 +113,30 @@ In `VERTEX` mode:
 In `RBD` mode:
 
 - `Source Collection`
-- `Skip Scale`
 
 ### Animation Section
 
-Current fields:
+Fields common to both modes:
 
 - `Start Frame`
 - `End Frame`
 - `Reference Frame`
-- `UV Index`
 - `Source FPS` as read-only label
 - `Frame Step`
 
-Compatibility note:
+Fields common to both modes (Animation section):
+
+- `Start Frame`
+- `End Frame`
+- `Reference Frame`
+- `Source FPS` as read-only label
+- `Frame Step`
+
+Compatibility notes:
 
 - if an older Blender session still holds a stale property group and `uv_map_index` is missing, the UI currently shows `UV Index: 0 (reload addon)` instead of failing
 - if `frame_drop_step` is missing, the UI shows `Frame Step: unavailable (reload addon)`
+- if `rbd_packing_method` is missing, the UI shows `Packing Method: unavailable (reload addon)` and falls back to `UV_PACKING`
 - if the `Export Mode` enum is stale, the UI shows a warning asking for addon disable/enable
 
 ### Output Section
@@ -166,6 +174,27 @@ Current runtime behavior:
 
 - the small version text in the main panel is sourced from `constants.UI_VERSION_LABEL`
 - when the visible UI version changes, `constants.UI_VERSION_LABEL` must be updated so the panel stays in sync
+
+### Export Settings Section
+
+Inline box section drawn directly in `UVB_PT_main`. Always visible for both modes and always expanded (not a child panel). Placed between `Output` and `Export`.
+
+In `VERTEX` mode:
+
+- `UV Index`
+
+In `RBD` mode:
+
+- `Skip Scale`
+- `Packing Method` — expanded (radio button / segment control) style, three options:
+  - `UV Packing` (internal value `UV_PACKING`, GN index `0`)
+  - `Vertex Color Packing` (internal value `VERTEX_COLOR_PACKING`, GN index `1`)
+  - `Object Index Packing` (internal value `OBJECT_INDEX_PACKING`, GN index `2`)
+- `Objects in collection` — read-only label showing live object count from `rbd_source_collection`
+- When `Vertex Color Packing` is selected: note "Vertex Color Packing: max 1020 objects". Turns red with ERROR icon if count exceeds 1020.
+- `UV Index` — shown only when `Packing Method` is `UV Packing`
+
+Note: The GN `Packing Method` socket is an Int type (not a Menu type). Values 0 / 1 / 2 are sent directly as integers.
 
 ### Advanced Panel
 
@@ -220,7 +249,8 @@ Important settings currently exposed somewhere in the UI:
 - `End Frame`
 - `Reference Frame`
 - `Frame Step`
-- `UV Index`
+- `Packing Method` (RBD mode only)
+- `UV Index` (always in Vertex mode; in RBD mode only when Packing Method is UV Packing)
 - `Output Folder`
 - `Export JSON`
 - `Export FBX`
@@ -302,6 +332,7 @@ Current important input sockets on `ComputeRBDtoVAT`:
 - `ShowAlph`
 - `SkipGridTransfer`
 - `SkipScale`
+- `PackingMethod` — menu socket (integer index); Python resolves it via `_find_packing_method_identifier` with alias names `("PackingMethod", "Packing Method", "PackMethod", "Pack Method")`
 - `Start Frame`
 - `End Frame`
 - `Reference Frame`
@@ -320,6 +351,7 @@ Relevant helpers:
 - `_set_uv_name_input`
 - `_set_show_export_mesh`
 - `_set_skip_grid_transfer`
+- `_set_packing_method` (RBD only)
 
 ## Attribute And Bake Contract
 
@@ -336,6 +368,11 @@ Mode-specific range attributes (returned by `handler.position_range_attr_names()
 
 - Vertex: `min`, `max` (no size range)
 - RBD: `Pos_Min`, `Pos_Max`, `Size_Min`, `Size_Max`
+
+Common attributes read in both modes:
+
+- `TextureSize`
+- `V_RepeatAmount` — optional; written to JSON as `Vat_V_RepeatAmount` if present. First attempted with `SkipGridTransfer=True` in `_apply_end_frame_export_settings`. If not captured there, it is also read during the `_ensure_end_frame_min_max_attributes` SkipGridTransfer=False retry pass. The early-return condition in that function checks whether `V_RepeatAmount` is already populated before skipping the retry, so the retry always fires if the attribute was not captured in the first pass.
 
 The code intentionally toggles `SkipGridTransfer` during different phases:
 
@@ -435,9 +472,19 @@ Current implementation:
    snapshot the evaluated mesh from `VAT_HelperPlane` while `ShowExportMesh = True`
    if the helper still evaluates to instances, add a temporary `Realize Instances` probe before snapshotting
 6. ensure the resulting mesh contains the requested export UV layer
-7. export that helper-derived mesh as FBX
+7. set the active Color Attribute (index 0, both `active_color_index` and `render_color_index`) so the GN-output Color Attribute is guaranteed to be used — see `_ensure_active_color_attribute`
+8. export that helper-derived mesh as FBX with `colors_type="LINEAR"` to preserve raw linear data without sRGB gamma correction
 
 This means the FBX should represent the final Geometry Nodes export mesh, not the original source mesh and not `VAT_RefFrameOBJ`.
+
+### Vertex Color Export
+
+For RBD mode with `VERTEX_COLOR_PACKING`, the GN outputs a Color Attribute on the POINT (vertex) domain. The FBX exporter converts POINT domain to face-corner automatically.
+
+Key requirements:
+- The GN socket must output a **Color type** attribute (FLOAT_COLOR or BYTE_COLOR), not FLOAT3/VECTOR — only Color type attributes go into `mesh.color_attributes` and are exported as vertex colors by the FBX exporter.
+- `colors_type="LINEAR"` is required because the packed ID data is linear; SRGB gamma correction would corrupt the values.
+- `_ensure_active_color_attribute` explicitly sets `active_color_index = 0` and `render_color_index = 0` before export, guaranteeing the GN-created attribute is used even if multiple color attributes exist.
 
 Relevant function:
 
@@ -458,12 +505,14 @@ Optional JSON export includes:
 - `Vat_TextureSize`
 - `Vat_PositionRangeMin`
 - `Vat_PositionRangeMax`
+- `Vat_V_RepeatAmount` — float scalar read from GN Point attribute `V_RepeatAmount`. Omitted from JSON if the attribute is not present on the helper geometry.
 
 RBD mode also includes:
 
 - `Vat_SkipScale`
 - `Vat_SizeRangeMin`
 - `Vat_SizeRangeMax`
+- `Vat_PackingMethod` — integer matching the selected packing mode: `0` = UV Packing, `1` = Vertex Color Packing, `2` = Object Index Packing
 
 `Vat_TextureSize` is exported as a single float scalar, not a `{width, height}` object, because the workflow validates square textures before export.
 
@@ -608,6 +657,36 @@ RBD mode no longer uses ABC export/import. Instead, `_bake_source_transforms_to_
 4. No disk I/O is required
 
 This correctly captures rigid body and any other object-level animation that the depsgraph evaluates, without needing to serialize full mesh data to disk per frame. Cleanup requires no special handling: the objects carry only standard keyframe animation data, no `MESH_SEQUENCE_CACHE` or `CacheFile`.
+
+### Blender 5.x Layered Action API (`_iter_action_fcurves`)
+
+Blender 4.4+ changed the `Action` datablock to a layered structure. `action.fcurves` no longer exists directly on new-style actions. A helper `_iter_action_fcurves(action)` was added to `workflow.py` to yield all FCurves from either a legacy flat action or a layered action transparently:
+
+- if `action.fcurves` exists → legacy path (Blender < 4.4)
+- otherwise → walks `action.layers → strips → channel_bags → fcurves`
+
+All code that previously iterated `action.fcurves` directly must use this helper instead.
+
+### `PreparedExport.end_frame_attributes`
+
+`end_frame_attributes` is a `dict` field on `PreparedExport` (declared with `field(default_factory=dict)`). It is populated by `_apply_end_frame_export_settings` and may be patched in by `_ensure_end_frame_min_max_attributes`. All code accessing it uses `getattr(prepared, "end_frame_attributes", {}) or {}` for compatibility with older serialized state, but the field is now properly declared in the dataclass.
+
+### RBD Packing Method
+
+A new per-scene property `rbd_packing_method` (EnumProperty) was added to `UVB_PG_settings`. It controls how per-object ID data is packed into the VAT texture in RBD mode.
+
+Constants defined in `constants.py`:
+
+```python
+RBD_PACKING_METHOD_UV           = "UV_PACKING"         # GN index 0
+RBD_PACKING_METHOD_VERTEX_COLOR = "VERTEX_COLOR_PACKING"  # GN index 1
+RBD_PACKING_METHOD_OBJECT_INDEX = "OBJECT_INDEX_PACKING"   # GN index 2
+RBD_PACKING_METHOD_GN_INDEX     = { ... }  # maps string → int
+```
+
+At export time, `_RBDModeHandler.wire_extra_sockets` calls `_set_packing_method(...)` to push the integer index into the GN modifier's `Packing Method` menu socket. The socket is optional (`allow_missing=True`) so missing it only logs a WARNING.
+
+The value is also written to the JSON output as `Vat_PackingMethod` (integer 0–2) when JSON export is enabled.
 
 ### `ShowAlpha = False` Before Normal Render in Vertex Mode
 

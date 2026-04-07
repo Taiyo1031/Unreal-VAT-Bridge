@@ -7,14 +7,14 @@ import os
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import bpy
 
 from . import constants, preview
 
 UVB_RUNTIME_NODE_GROUP_PREFIX = "UVB_Runtime_"
-UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-04-rbd-showalph-v30"
+UVB_WORKFLOW_BUILD_ID = "uvb-workflow-2026-04-08-vertex-color-linear-v31"
 WHAT_TO_SHOW_POSITION = "Position"
 WHAT_TO_SHOW_NORMAL = "Normal/UVOffset"
 WHAT_TO_SHOW_MENU_INDEX = {
@@ -278,6 +278,8 @@ class _RBDModeHandler(ModeHandler):
     def wire_extra_sockets(self, prepared, gn_modifier, settings, report):
         _set_skip_scale(prepared.node_group, gn_modifier, _get_rbd_skip_scale(settings), reporter=report)
         _set_show_alph(prepared.node_group, gn_modifier, False, reporter=report, allow_missing=True)
+        packing_method = str(getattr(settings, "rbd_packing_method", constants.RBD_PACKING_METHOD_UV))
+        _set_packing_method(prepared.node_group, gn_modifier, packing_method, reporter=report, allow_missing=True)
 
     def exports_normal_texture(self):
         return False
@@ -295,7 +297,11 @@ class _RBDModeHandler(ModeHandler):
         return ("Size_Min", "Size_Max")
 
     def extra_json_fields(self, settings, end_frame_attrs, size_attr_names):
-        fields = {"Vat_SkipScale": bool(_get_rbd_skip_scale(settings))}
+        packing_method = str(getattr(settings, "rbd_packing_method", constants.RBD_PACKING_METHOD_UV))
+        fields = {
+            "Vat_SkipScale": bool(_get_rbd_skip_scale(settings)),
+            "Vat_PackingMethod": constants.RBD_PACKING_METHOD_GN_INDEX.get(packing_method, 0),
+        }
         if size_attr_names:
             size_min_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[0]))
             size_max_value = end_frame_attrs.get(_attribute_lookup_key(size_attr_names[1]))
@@ -359,6 +365,7 @@ class PreparedExport:
     node_group: bpy.types.NodeTree
     export_texture_width: int
     export_texture_height: int
+    end_frame_attributes: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -743,6 +750,32 @@ def _duplicate_sources_via_abc(context, original_scene, temp_scene, prepared, se
             pass
 
 
+def _iter_action_fcurves(action):
+    """Yield all FCurves from an action.
+
+    Blender 4.4+ uses a layered action structure where ``fcurves`` is no
+    longer a direct attribute of the Action datablock.  This helper
+    transparently handles both the legacy flat layout and the new layered
+    layout so callers do not need to branch on the Blender version.
+    """
+    if action is None:
+        return
+    # Legacy flat action (Blender < 4.4): fcurves live directly on the action.
+    if hasattr(action, "fcurves"):
+        yield from action.fcurves
+        return
+    # Layered action (Blender 4.4+ / 5.x): layers → strips → channel_bags → fcurves.
+    for layer in getattr(action, "layers", []):
+        for strip in getattr(layer, "strips", []):
+            channel_bags = (
+                getattr(strip, "channel_bags", None)
+                or getattr(strip, "channelbags", None)
+                or []
+            )
+            for channel_bag in channel_bags:
+                yield from getattr(channel_bag, "fcurves", [])
+
+
 def _bake_source_transforms_to_keyframes(context, original_scene, temp_scene, prepared, settings, reporter=None):
     """Copy source objects into temp_scene and bake their evaluated world transforms as keyframes.
     Captures rigid body physics without disk I/O. Intended for RBD mode only.
@@ -785,7 +818,7 @@ def _bake_source_transforms_to_keyframes(context, original_scene, temp_scene, pr
 
     for obj_copy in source_copy_objects:
         if obj_copy.animation_data and obj_copy.animation_data.action:
-            for fcurve in obj_copy.animation_data.action.fcurves:
+            for fcurve in _iter_action_fcurves(obj_copy.animation_data.action):
                 for kp in fcurve.keyframe_points:
                     kp.interpolation = "CONSTANT"
 
@@ -890,7 +923,6 @@ def _get_export_mode(settings):
     return mode
 
 
-
 def _get_node_group_name_for_mode(settings):
     export_mode = _get_export_mode(settings)
     mapping = getattr(constants, "GN_GROUP_BY_MODE", {}) or {}
@@ -901,6 +933,7 @@ def _get_node_group_name_for_mode(settings):
     if export_mode == getattr(constants, "EXPORT_MODE_RBD", "RBD"):
         return "ComputeRBDtoVAT"
     raise ExportWorkflowError(f"Unsupported export mode: {export_mode}")
+
 
 def _get_rbd_source_collection(settings):
     return getattr(
@@ -1261,6 +1294,39 @@ def _find_show_alph_identifier(node_group):
     )
 
 
+def _find_packing_method_identifier(node_group):
+    resolved = _resolve_input_socket_identifiers(node_group)
+    return _find_socket_identifier(
+        resolved,
+        ("PackingMethod", "Packing Method", "PackMethod", "Pack Method"),
+    )
+
+
+def _set_packing_method(node_group, gn_modifier, method_id, reporter=None, allow_missing=True):
+    report = reporter if reporter else (lambda _level, _message: None)
+    identifier = _find_packing_method_identifier(node_group)
+    if not identifier:
+        if allow_missing:
+            report({"WARNING"}, "PackingMethod input was not found on Geometry Nodes group.")
+            return None
+        raise ExportWorkflowError(
+            "PackingMethod input was not found on Geometry Nodes group."
+        )
+
+    gn_index = constants.RBD_PACKING_METHOD_GN_INDEX.get(method_id)
+    if gn_index is None:
+        raise ExportWorkflowError(f"Unsupported RBD packing method: {method_id!r}")
+
+    try:
+        gn_modifier[identifier] = int(gn_index)
+    except Exception as exc:
+        raise ExportWorkflowError(
+            f"Failed to assign PackingMethod={method_id!r} to Geometry Nodes input '{identifier}': {exc}"
+        ) from exc
+
+    return identifier
+
+
 def _set_what_to_show_mode(node_group, gn_modifier, mode_name, reporter=None, allow_missing=False):
     report = reporter if reporter else (lambda _level, _message: None)
     identifier = _find_what_to_show_identifier(node_group)
@@ -1594,6 +1660,7 @@ def _apply_end_frame_export_settings(context, temp_state, prepared, settings, en
                 "cameraortho",
                 "cameralocation",
                 "cameraposition",
+                "v_repeatamount",
             ),
         )
 
@@ -1679,10 +1746,19 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, settings
     max_attr_key = _attribute_lookup_key(max_attr_name)
     size_attr_keys = tuple(_attribute_lookup_key(name) for name in size_attr_names)
 
+    # Optional scalar attributes that may also need SkipGridTransfer=False to be readable.
+    # Declared here so the early-return check can verify they are already populated.
+    optional_extra_names = ("V_RepeatAmount",)
+    optional_extra_keys = tuple(_attribute_lookup_key(n) for n in optional_extra_names)
+
     attrs = getattr(prepared, "end_frame_attributes", {}) or {}
     min_value = attrs.get(min_attr_key)
     max_value = attrs.get(max_attr_key)
-    if min_value is not None and max_value is not None:
+    # Only return early if ALL required attrs AND all optional extras are already populated.
+    # If any optional extra is missing, fall through to the SkipGridTransfer=False retry so
+    # it has a chance to capture those values (e.g. V_RepeatAmount when it requires False).
+    all_optional_found = all(attrs.get(k) is not None for k in optional_extra_keys)
+    if min_value is not None and max_value is not None and all_optional_found:
         if not size_attr_names:
             return
         if attrs.get(size_attr_keys[0]) is not None and attrs.get(size_attr_keys[1]) is not None:
@@ -1701,13 +1777,13 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, settings
             temp_state.scene,
             temp_state.helper_object,
             eval_frame,
-            (min_attr_name, max_attr_name, *size_attr_names),
+            (min_attr_name, max_attr_name, *size_attr_names, *optional_extra_names),
         )
     finally:
         _set_skip_grid_transfer(prepared.node_group, temp_state.gn_modifier, True, report)
         temp_state.scene.frame_set(eval_frame)
 
-    for attr_name in (min_attr_name, max_attr_name, *size_attr_names):
+    for attr_name in (min_attr_name, max_attr_name, *size_attr_names, *optional_extra_names):
         attr_key = _attribute_lookup_key(attr_name)
         if attr_key in values_false and attrs.get(attr_key) is None:
             attrs[attr_key] = values_false[attr_key]
@@ -1767,6 +1843,8 @@ def _ensure_end_frame_min_max_attributes(context, temp_state, prepared, settings
         f"SkipGridTransfer=True -> Point: {text_point_true} | Instance(realized): {text_instance_true}. "
         f"SkipGridTransfer=False -> Point: {text_point_false} | Instance(realized): {text_instance_false}."
     )
+
+
 def _apply_texture_size_from_gn_attribute(context, temp_state, prepared, evaluate_frame, reporter=None):
     report = reporter if reporter else (lambda _level, _message: None)
 
@@ -4248,6 +4326,9 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
     if normal_texture:
         texture_names.append(os.path.basename(normal_texture))
 
+    v_repeat_raw = end_frame_attrs.get(_attribute_lookup_key("v_repeatamount"))
+    v_repeat_scalar = _coerce_float_numeric_value(v_repeat_raw) if v_repeat_raw is not None else None
+
     payload = {
         "Vat_NumFrames": duration,
         "VatMode": _get_vat_mode_index(settings),
@@ -4263,6 +4344,9 @@ def _export_json_metadata(context, prepared, temp_state, settings, position_text
         "Vat_PositionRangeMin": _json_vector3(min_value),
         "Vat_PositionRangeMax": _json_vector3(max_value),
     }
+
+    if v_repeat_scalar is not None:
+        payload["Vat_V_RepeatAmount"] = float(v_repeat_scalar)
 
     extra = _get_mode_handler(settings).extra_json_fields(settings, end_frame_attrs, size_attr_names)
     payload.update(extra)
@@ -4354,6 +4438,7 @@ def _export_mesh_fbx(context, prepared, temp_state, settings, reporter=None):
         export_object.name = prepared.asset_name
 
         _ensure_export_mesh_uv_layer(export_object, temp_state.selected_uv_name, _get_uv_map_index(settings))
+        _ensure_active_color_attribute(export_object, reporter=report)
 
         if getattr(export_object, "data", None) is None or len(export_object.data.vertices) == 0:
             raise ExportWorkflowError("Export mesh is empty after applying VAT_HelperPlane modifiers.")
@@ -4372,6 +4457,7 @@ def _export_mesh_fbx(context, prepared, temp_state, settings, reporter=None):
                 use_selection=True,
                 bake_anim=False,
                 add_leaf_bones=False,
+                colors_type="LINEAR",
             )
         if "FINISHED" not in result:
             raise ExportWorkflowError("FBX export did not complete successfully.")
@@ -4510,6 +4596,32 @@ def _find_nodes_modifier(obj, preferred_name=None):
         if modifier.type == "NODES":
             return modifier
     return None
+
+
+def _ensure_active_color_attribute(obj, reporter=None):
+    """Set the first GN-output Color Attribute as the active render color for FBX export.
+
+    new_from_object(preserve_all_data_layers=True) brings over all Color Attributes
+    from evaluated GN geometry.  Setting both active_color_index and render_color_index
+    guarantees the FBX exporter picks up the GN attribute regardless of Blender version.
+    """
+    report = reporter if reporter else (lambda _l, _m: None)
+    mesh_data = getattr(obj, "data", None)
+    if mesh_data is None:
+        return
+    color_attrs = getattr(mesh_data, "color_attributes", None)
+    if not color_attrs or len(color_attrs) == 0:
+        report({"INFO"}, "No Color Attributes found on export mesh — vertex color skipped.")
+        return
+    try:
+        mesh_data.color_attributes.active_color_index = 0
+    except Exception:
+        pass
+    try:
+        mesh_data.color_attributes.render_color_index = 0
+    except Exception:
+        pass
+    report({"INFO"}, f"Active color attribute set to: {color_attrs[0].name!r} (domain={color_attrs[0].domain}, type={color_attrs[0].data_type})")
 
 
 def _ensure_export_mesh_uv_layer(obj, preferred_name, fallback_index=0):

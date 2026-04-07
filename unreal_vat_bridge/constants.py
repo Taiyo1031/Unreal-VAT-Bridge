@@ -27,3 +27,20 @@ GN_GROUP_BY_MODE = {
 
 POSITION_SUFFIX = "Position"
 NORMAL_SUFFIX = "Normal"
+
+RBD_PACKING_METHOD_UV = "UV_PACKING"
+RBD_PACKING_METHOD_VERTEX_COLOR = "VERTEX_COLOR_PACKING"
+RBD_PACKING_METHOD_OBJECT_INDEX = "OBJECT_INDEX_PACKING"
+
+RBD_PACKING_METHOD_ITEMS = (
+    (RBD_PACKING_METHOD_UV, "UV Packing", "Use a UV channel to identify each object"),
+    (RBD_PACKING_METHOD_VERTEX_COLOR, "Vertex Color Packing", "Use vertex color to identify each object"),
+    (RBD_PACKING_METHOD_OBJECT_INDEX, "Object Index Packing", "Use a per-object index to identify each object"),
+)
+
+# Integer index sent to the Geometry Nodes 'Packing Method' menu socket.
+RBD_PACKING_METHOD_GN_INDEX = {
+    RBD_PACKING_METHOD_UV: 0,
+    RBD_PACKING_METHOD_VERTEX_COLOR: 1,
+    RBD_PACKING_METHOD_OBJECT_INDEX: 2,
+}

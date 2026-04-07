@@ -78,20 +78,13 @@ class UVB_PT_main(Panel):
             else:
                 source_box.prop(settings, "rigid_source_collection", text="Source Collection")
 
-            if hasattr(settings, "rbd_skip_scale"):
-                source_box.prop(settings, "rbd_skip_scale", text="Skip Scale")
-            else:
-                source_box.label(text=f"Skip Scale: {_get_rbd_skip_scale(settings)} (reload addon)")
-
         animation_box = layout.box()
         animation_box.label(text="Animation")
         animation_box.prop(settings, "start_frame", text="Start Frame")
         animation_box.prop(settings, "end_frame", text="End Frame")
         animation_box.prop(settings, "reference_frame", text="Reference Frame")
-        if hasattr(settings, "uv_map_index"):
-            animation_box.prop(settings, "uv_map_index", text="UV Index")
-        else:
-            animation_box.label(text="UV Index: 0 (reload addon)")
+
+
         source_fps = preview.get_source_fps(context.scene)
         source_fps_row = animation_box.row()
         source_fps_row.enabled = False
@@ -108,6 +101,52 @@ class UVB_PT_main(Panel):
         output_box.prop(settings, "export_json_metadata", text="Export JSON")
         output_box.prop(settings, "export_mesh_file", text="Export FBX")
 
+        es_box = layout.box()
+        es_box.label(text="Export Settings")
+        if _get_export_mode(settings) == constants.EXPORT_MODE_VERTEX:
+            if hasattr(settings, "uv_map_index"):
+                es_box.prop(settings, "uv_map_index", text="UV Index")
+            else:
+                es_box.label(text="UV Index: 0 (reload addon)")
+
+        if _get_export_mode(settings) == constants.EXPORT_MODE_RBD:
+
+            if hasattr(settings, "rbd_skip_scale"):
+                es_box.prop(settings, "rbd_skip_scale", text="Skip Scale")
+            else:
+                es_box.label(text=f"Skip Scale: {_get_rbd_skip_scale(settings)} (reload addon)")
+
+            es_box.separator(factor=0.5)
+
+            if hasattr(settings, "rbd_packing_method"):
+                es_box.label(text="Packing Method")
+                es_box.row().prop(settings, "rbd_packing_method", expand=True)
+                packing_method = str(getattr(settings, "rbd_packing_method", constants.RBD_PACKING_METHOD_UV))
+            else:
+                es_box.label(text="Packing Method: unavailable (reload addon)")
+                packing_method = constants.RBD_PACKING_METHOD_UV
+
+            rbd_collection = getattr(settings, "rbd_source_collection", None)
+            obj_count = len(rbd_collection.objects) if rbd_collection else 0
+            count_row = es_box.row()
+            count_row.enabled = False
+            count_row.label(text=f"Objects in collection: {obj_count}")
+
+            if packing_method == constants.RBD_PACKING_METHOD_VERTEX_COLOR:
+                limit_row = es_box.row()
+                limit_row.enabled = False
+                if obj_count > 1020:
+                    limit_row.alert = True
+                    limit_row.label(text=f"Vertex Color Packing: max 1020 objects (current: {obj_count})", icon="ERROR")
+                else:
+                    limit_row.label(text="Vertex Color Packing: max 1020 objects")
+
+            if packing_method == constants.RBD_PACKING_METHOD_UV:
+                if hasattr(settings, "uv_map_index"):
+                    es_box.prop(settings, "uv_map_index", text="UV Index")
+                else:
+                    es_box.label(text="UV Index: 0 (reload addon)")
+
         export_box = layout.box()
         export_box.label(text="Export")
         export_box.label(text=_get_export_summary_text(settings))
@@ -119,6 +158,7 @@ class UVB_PT_main(Panel):
         copy_button = button_row.row(align=True)
         copy_button.enabled = bool(getattr(settings, "last_exported_json_text", "").strip())
         copy_button.operator("unreal_vat_bridge.copy_last_json", text="Copy JSON")
+
 
 
 class UVB_PT_advanced(Panel):

@@ -95,6 +95,12 @@ class UVB_PG_settings(PropertyGroup):
         description="Skip exporting scale data in RBD mode",
         default=False,
     )
+    rbd_packing_method: EnumProperty(
+        name="Packing Method",
+        description="How per-object ID data is packed into the VAT texture in RBD mode",
+        items=constants.RBD_PACKING_METHOD_ITEMS,
+        default=constants.RBD_PACKING_METHOD_UV,
+    )
 
     texture_format: EnumProperty(
         name="Texture Format",
